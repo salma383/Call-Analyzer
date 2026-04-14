@@ -451,20 +451,23 @@ Call Recording:""",
 # ─── Whisper vocabulary prompt ───────────────────────────────────────────────
 
 WHISPER_VOCAB = (
-    "Real estate sales call. Terms: mortgage, equity, foreclosure, tax lien, "
-    "beds, baths, sqft, square feet, occupancy, owner-occupied, vacant, rental, "
-    "asking price, market value, Zillow, MLS, listing, realtor, cash offer, "
-    "closing costs, title, escrow, HOA, appraisal, inspection, earnest money, "
-    "pre-approval, down payment, refinance, short sale, wholesaler, ARV, "
-    "after repair value, CapEx, multifamily, duplex, triplex, fourplex, "
-    "senior housing, assisted living, memory care, "
-    "M&A, acquisition, revenue, EBITDA, SaaS, annual revenue, "
-    "ReSimpli, HubSpot, GHL, PhoneBurner, Call Tools, Enzo, "
-    "Rejigg, Loftey, Barracuda, Integrity, Haven Senior, Premier Site, Biancardi, "
-    "Smithton, Boone, CIC Partners, Real Broker NJ, Giancarlo, Shiraz, Stuart Moss. "
-    "Email addresses should be written as complete addresses like john@gmail.com, "
-    "not spelled out letter by letter."
+    "mortgage, equity, foreclosure, tax lien, sqft, square feet, "
+    "owner-occupied, Zillow, MLS, realtor, cash offer, escrow, HOA, "
+    "appraisal, earnest money, refinance, ARV, CapEx, multifamily, "
+    "duplex, triplex, EBITDA, ReSimpli, HubSpot, GHL, "
+    "Rejigg, Loftey, Barracuda, Integrity, Haven Senior, Biancardi, "
+    "Smithton, Boone, CIC Partners, Giancarlo, Shiraz"
 )
+
+# Known Whisper hallucinations to filter out of transcripts
+WHISPER_HALLUCINATIONS = [
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "email addresses should be written",
+    "not spelled out letter by letter",
+]
 
 
 # ─── Universal rules ────────────────────────────────────────────────────────
