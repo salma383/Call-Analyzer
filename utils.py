@@ -57,11 +57,20 @@ def call_with_retry(fn, *args, max_retries=3, **kwargs):
 
 # ─── Transcription ───────────────────────────────────────────────────────────
 
-def transcribe_audio(client_groq, audio_file, whisper_prompt=""):
+def _is_hallucination(text, hallucination_list):
+    """Check if a segment is a known Whisper hallucination."""
+    lower = text.lower().strip()
+    return any(h in lower for h in hallucination_list)
+
+
+def transcribe_audio(client_groq, audio_file, whisper_prompt="", hallucinations=None):
     """
-    Transcribe audio via Groq Whisper, apply diarization heuristic.
+    Transcribe audio via Groq Whisper, filter hallucinations, apply diarization.
     Returns (transcript_text, segments, diarized_transcript).
     """
+    if hallucinations is None:
+        hallucinations = []
+
     suffix = f".{audio_file.name.split('.')[-1]}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_file.read())
@@ -77,11 +86,25 @@ def transcribe_audio(client_groq, audio_file, whisper_prompt=""):
                 timestamp_granularities=["segment"],
                 language="en",
                 prompt=whisper_prompt,
-                temperature=0.2,
+                temperature=0.0,
             )
 
         segments = getattr(transcription, "segments", [])
-        transcript_text = transcription.text
+
+        # Filter out hallucinated segments
+        clean_segments = []
+        for seg in segments:
+            text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
+            if text and not _is_hallucination(text, hallucinations):
+                clean_segments.append(seg)
+
+        # Rebuild plain text from clean segments
+        clean_texts = []
+        for seg in clean_segments:
+            text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
+            if text:
+                clean_texts.append(text)
+        transcript_text = " ".join(clean_texts) if clean_texts else transcription.text
 
         # Speaker diarization heuristic — gap > 0.6s = speaker switch
         PAUSE_THRESHOLD = 0.6
@@ -89,7 +112,7 @@ def transcribe_audio(client_groq, audio_file, whisper_prompt=""):
         diarized_lines = []
         prev_end = 0.0
 
-        for seg in segments:
+        for seg in clean_segments:
             start = seg.get("start", 0) if isinstance(seg, dict) else getattr(seg, "start", 0)
             end = seg.get("end", 0) if isinstance(seg, dict) else getattr(seg, "end", 0)
             text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()

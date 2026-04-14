@@ -3,7 +3,7 @@ import json
 import os
 import datetime
 from groq import Groq
-from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES, WHISPER_VOCAB
+from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
 from utils import (
     sanitize_filename, hash_audio_file, transcribe_audio,
     build_scoring_prompt, score_transcript, chunk_transcript,
@@ -11,7 +11,10 @@ from utils import (
 )
 
 # ─── API Key ─────────────────────────────────────────────────────────────────
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+try:
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+except (KeyError, FileNotFoundError):
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     st.error("No Groq API key found. Add GROQ_API_KEY to Streamlit Secrets or environment.")
     st.stop()
@@ -194,7 +197,7 @@ if analyze_btn:
                 with st.spinner("🎙️ Transcribing with Whisper…"):
                     try:
                         transcript_text, segments, diarized_transcript = transcribe_audio(
-                            client_groq, audio_file, WHISPER_VOCAB
+                            client_groq, audio_file, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
                         )
                         st.session_state[cache_key] = (transcript_text, segments, diarized_transcript)
                     except Exception as e:
