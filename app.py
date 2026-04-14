@@ -1,15 +1,27 @@
 import streamlit as st
 import json
-import tempfile
 import os
+import datetime
 from groq import Groq
-from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES
+from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES, WHISPER_VOCAB
+from utils import (
+    sanitize_filename, hash_audio_file, transcribe_audio,
+    build_scoring_prompt, score_transcript, chunk_transcript,
+    merge_scoring_results, reconstruct_spelled_out, append_audit_log,
+)
 
 # ─── API Key ─────────────────────────────────────────────────────────────────
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+if not GROQ_API_KEY:
+    st.error("No Groq API key found. Add GROQ_API_KEY to Streamlit Secrets or environment.")
+    st.stop()
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MyVA Call Analyzer", page_icon="📞", layout="wide")
+
+# ─── Session state init ─────────────────────────────────────────────────────
+if "analysis_history" not in st.session_state:
+    st.session_state.analysis_history = []
 
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -96,29 +108,40 @@ st.markdown("""
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 📋 Call Details")
-    client_name   = st.selectbox("Client / Campaign", list(CLIENT_CRITERIA.keys()))
-    dialer_source = st.selectbox("Dialer Source", ["Call Tools","Enzo Dialer","Ready Mode","PhoneBurner","Other"])
-    agent_name    = st.text_input("Agent Name", placeholder="e.g. Joy, Nehal…")
-    call_date     = st.date_input("Call Date")
+    client_name = st.selectbox("Client / Campaign", list(CLIENT_CRITERIA.keys()))
+    agent_name  = st.text_input("Agent Name", placeholder="e.g. Joy, Nehal…")
+    call_date   = st.date_input("Call Date")
     st.markdown("---")
     st.markdown("### 🎚️ Options")
     show_transcript = st.checkbox("Show full transcript", value=True)
     show_universal  = st.checkbox("Universal rules check", value=True)
     export_json     = st.checkbox("Enable JSON export",    value=False)
 
+    # Session history
+    if st.session_state.analysis_history:
+        st.markdown("---")
+        st.markdown("### 📊 Past Analyses")
+        for h in reversed(st.session_state.analysis_history):
+            st.markdown(
+                f"**{h['agent']}** — {h['client']} — "
+                f"{h['score']}/100 ({h['timestamp']})"
+            )
+
 # ─── Main layout ─────────────────────────────────────────────────────────────
 col1, col2 = st.columns([1.3, 1])
 
 with col1:
     st.markdown("#### 🎙️ Upload Call Recording")
-    audio_file = st.file_uploader(
+    audio_files = st.file_uploader(
         "MP3, MP4, M4A, WAV, OGG, FLAC, WEBM",
-        type=["mp3","mp4","m4a","wav","ogg","flac","webm"],
-        label_visibility="collapsed"
+        type=["mp3", "mp4", "m4a", "wav", "ogg", "flac", "webm"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
     )
-    if audio_file:
-        st.audio(audio_file)
-        st.caption(f"📁 {audio_file.name} · {audio_file.size/1024/1024:.1f} MB · {dialer_source}")
+    if audio_files:
+        for af in audio_files:
+            st.audio(af)
+            st.caption(f"📁 {af.name} · {af.size/1024/1024:.1f} MB")
 
 with col2:
     if client_name:
@@ -135,243 +158,173 @@ with col2:
             for d in c["hard_disqualifiers"]:
                 st.markdown(f"🚫 {d}")
 
-# ─── Prompt helpers ───────────────────────────────────────────────────────────
-RE_TEMPLATE = """(Agent name and date)
-Temp: 
-Lead Type: 
-Seller Name: 
-Address: 
-Phone Number: 
-Email: 
-Motive/Pain: 
-Actively Selling? 
-List with Realtor? 
-What if we didn't give them the price: 
-Occupancy: 
-Beds/Baths: 
-Sqft: 
-Condition/Repairs: 
-Mortgage: 
-Market Value: 
-Asking Price: 
-Timeline: 
-Callback: 
-Notes: 
-Call Recording:"""
-
-BIZ_TEMPLATE = """(Agent name and date)
-Temp: (Cold, Warm, Hot, Nurture, Networking etc.)
-
-Contact Info:
-  Contact Name: 
-  Business Name: 
-  Number: 
-  Email: 
-
-Business Details:
-  Business Address: 
-  Nature of Business: 
-  Number of Employees: 
-  Est. Annual Revenue: 
-  Best Time Window for Intro Call: 
-  Notes: 
-
-Call Recording:"""
-
 # ─── Analyze button ───────────────────────────────────────────────────────────
 st.markdown("---")
 analyze_btn = st.button("🚀 Transcribe & Analyze", type="primary", use_container_width=True)
 
 if analyze_btn:
-    if not GROQ_API_KEY:
-        st.error("❌ No Groq API key found. Ask your admin to add it to Streamlit Secrets.")
+    if not agent_name or not agent_name.strip():
+        st.error("Please enter the agent name.")
         st.stop()
-    if not audio_file:
+    if not audio_files:
         st.error("Please upload a call recording.")
         st.stop()
 
     client_groq = Groq(api_key=GROQ_API_KEY)
-    criteria    = CLIENT_CRITERIA[client_name]
-    is_biz      = criteria["type"] == "business"
-    template    = BIZ_TEMPLATE if is_biz else RE_TEMPLATE
+    criteria = CLIENT_CRITERIA[client_name]
+    template = criteria.get(
+        "lead_template",
+        LEAD_TEMPLATES.get(criteria["type"], LEAD_TEMPLATES["real_estate"])
+    )
+    safe_agent = sanitize_filename(agent_name)
 
-    # ── Transcribe ────────────────────────────────────────────────────────────
-    with st.spinner("🎙️ Transcribing with Whisper…"):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{audio_file.name.split('.')[-1]}") as tmp:
-            tmp.write(audio_file.read())
-            tmp_path = tmp.name
-        try:
-            with open(tmp_path, "rb") as f:
-                transcription = client_groq.audio.transcriptions.create(
-                    file=(audio_file.name, f.read()),
-                    model="whisper-large-v3",
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"],
-                    language="en"
-                )
-            segments = getattr(transcription, "segments", [])
-            transcript_text = transcription.text  # plain text for AI analysis
+    for file_idx, audio_file in enumerate(audio_files):
+        expanded = file_idx == 0
+        container = st.expander(f"Results: {audio_file.name}", expanded=expanded) if len(audio_files) > 1 else st.container()
 
-            # ── Speaker diarization heuristic ────────────────────────────────
-            # Gap of >0.6s between segments = speaker likely changed
-            PAUSE_THRESHOLD = 0.6
-            current_speaker = 1
-            diarized_lines  = []
-            prev_end        = 0.0
+        with container:
+            # ── Transcribe ────────────────────────────────────────────────
+            audio_hash = hash_audio_file(audio_file)
+            cache_key = f"transcript_{audio_hash}"
 
-            for seg in segments:
-                start = seg.get("start", 0) if isinstance(seg, dict) else getattr(seg, "start", 0)
-                end   = seg.get("end",   0) if isinstance(seg, dict) else getattr(seg, "end",   0)
-                text  = (seg.get("text","") if isinstance(seg, dict) else getattr(seg, "text","")).strip()
-                if not text:
+            if cache_key in st.session_state:
+                transcript_text, segments, diarized_transcript = st.session_state[cache_key]
+                st.info("Using cached transcript.")
+            else:
+                with st.spinner("🎙️ Transcribing with Whisper…"):
+                    try:
+                        transcript_text, segments, diarized_transcript = transcribe_audio(
+                            client_groq, audio_file, WHISPER_VOCAB
+                        )
+                        st.session_state[cache_key] = (transcript_text, segments, diarized_transcript)
+                    except Exception as e:
+                        st.error(f"Transcription failed: {e}")
+                        continue
+
+            # Post-process spelled-out emails/addresses in transcript
+            transcript_text = reconstruct_spelled_out(transcript_text)
+            diarized_transcript = reconstruct_spelled_out(diarized_transcript)
+
+            st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(segments) if segments else '?'} segments")
+
+            # ── Score (with chunking for long calls) ──────────────────────
+            MAX_TRANSCRIPT_CHARS = 24000
+
+            if len(transcript_text) > MAX_TRANSCRIPT_CHARS:
+                chunks = chunk_transcript(transcript_text)
+                results = []
+                for i, chunk in enumerate(chunks):
+                    with st.spinner(f"🧠 Scoring chunk {i+1}/{len(chunks)}…"):
+                        try:
+                            prompt = build_scoring_prompt(
+                                client_name, criteria, agent_name,
+                                call_date, chunk, template, UNIVERSAL_RULES,
+                            )
+                            results.append(score_transcript(client_groq, prompt))
+                        except Exception as e:
+                            st.error(f"Scoring failed on chunk {i+1}: {e}")
+                            break
+                if not results:
                     continue
-                gap = start - prev_end
-                if prev_end > 0 and gap > PAUSE_THRESHOLD:
-                    current_speaker = 2 if current_speaker == 1 else 1
-                mins  = int(start) // 60
-                secs  = int(start) % 60
-                ts    = f"{mins:02d}:{secs:02d}"
-                label = "Agent" if current_speaker == 1 else "Prospect"
-                diarized_lines.append(f"[{ts}] {label}: {text}")
-                prev_end = end
+                result = merge_scoring_results(results)
+            else:
+                with st.spinner("🧠 Scoring against client criteria…"):
+                    try:
+                        prompt = build_scoring_prompt(
+                            client_name, criteria, agent_name,
+                            call_date, transcript_text, template, UNIVERSAL_RULES,
+                        )
+                        result = score_transcript(client_groq, prompt)
+                    except Exception as e:
+                        st.error(f"Analysis failed: {e}")
+                        continue
 
-            diarized_transcript = "\n".join(diarized_lines) if diarized_lines else transcript_text
+            # Check for parse errors
+            if result.get("parse_error"):
+                st.warning("Could not parse the AI response as JSON.")
+                with st.expander("Raw AI response"):
+                    st.code(result.get("raw", ""))
+                continue
 
-        except Exception as e:
-            st.error(f"Transcription failed: {e}")
-            os.unlink(tmp_path)
-            st.stop()
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            # Post-process filled template for spelled-out emails
+            if result.get("lead_template_filled"):
+                result["lead_template_filled"] = reconstruct_spelled_out(
+                    result["lead_template_filled"]
+                )
 
-    st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(segments) if segments else '?'} segments")
+            # ── Audit log ─────────────────────────────────────────────────
+            try:
+                append_audit_log({
+                    "agent": agent_name,
+                    "client": client_name,
+                    "call_date": str(call_date),
+                    "score": result.get("overall_score"),
+                    "qualified": result.get("qualified"),
+                    "disposition": result.get("disposition_suggested"),
+                    "red_flags_count": len(result.get("red_flags_found", [])),
+                    "audio_filename": audio_file.name,
+                })
+            except Exception:
+                pass  # Don't break the app if logging fails
 
-    # ── Build prompt ──────────────────────────────────────────────────────────
-    checklist_str  = "\n".join([f"{i+1}. {x}" for i,x in enumerate(criteria["checklist"])])
-    universal_str  = "\n".join([f"{i+1}. {x}" for i,x in enumerate(UNIVERSAL_RULES)])
-    redflags_str   = "\n".join([f"- {r}" for r in criteria["red_flags"]])
-    disq_str       = "\n".join([f"- {d}" for d in criteria["hard_disqualifiers"]])
+            # ── Session history ───────────────────────────────────────────
+            st.session_state.analysis_history.append({
+                "agent": agent_name,
+                "client": client_name,
+                "call_date": str(call_date),
+                "score": result.get("overall_score", 0),
+                "disposition": result.get("disposition_suggested", "—"),
+                "qualified": result.get("qualified", False),
+                "summary": result.get("summary", ""),
+                "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+            })
 
-    prompt = f"""You are an expert call quality analyst for MyVA.
-Analyze this transcript and respond ONLY in valid JSON (no markdown, no preamble).
+            # ── Display ──────────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("## 📊 Results")
 
-CLIENT: {client_name}
-FRAMEWORK: {criteria['framework']}
-AGENT: {agent_name or 'Unknown'}
-SCRIPT NOTES: {criteria['script_notes']}
+            score  = result.get("overall_score", 0)
+            flags  = result.get("red_flags_found", [])
+            disq   = result.get("disqualifier_triggered")
+            qualif = result.get("qualified", False)
 
---- TRANSCRIPT ---
-{transcript_text}
---- END TRANSCRIPT ---
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Score",       f"{score}/100")
+            m2.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
+            m3.metric("Disposition", result.get("disposition_suggested", "—"))
+            m4.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
+            st.progress(score / 100)
 
-CHECKLIST:
-{checklist_str}
+            if disq:
+                st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
 
-UNIVERSAL RULES:
-{universal_str}
+            st.info(result.get("summary", ""))
 
-HARD DISQUALIFIERS:
-{disq_str}
+            # Tabs
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "📋 Lead Template", "✅ Checklist",
+                "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript",
+            ])
 
-RED FLAGS:
-{redflags_str}
+            # Tab 1 — Filled lead template
+            with tab1:
+                st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
+                filled = result.get("lead_template_filled", "Not available")
+                st.markdown(f'<div class="lead-template">{filled}</div>', unsafe_allow_html=True)
+                st.download_button(
+                    "⬇️ Copy Lead Template (.txt)", data=filled,
+                    file_name=f"lead_{safe_agent}_{call_date}.txt",
+                    mime="text/plain", key=f"dl_lead_{file_idx}",
+                )
 
-LEAD TEMPLATE TO FILL:
-{template}
-
-Instructions for lead template:
-- Fill every field using ONLY information extracted from the transcript
-- If a field was not discussed, write "Not captured"
-- For the agent name/date line, use: {agent_name or '[Agent Name]'} / {call_date}
-- For Call Recording: leave as "[Paste link here]"
-- Preserve the exact template structure including all labels
-
-Respond with this exact JSON:
-{{
-  "overall_score": <0-100>,
-  "disposition_suggested": "<Hot/Warm/Cold/Not Interested/Appointment Set/etc.>",
-  "qualified": <true/false>,
-  "disqualifier_triggered": "<disqualifier name or null>",
-  "lead_template_filled": "<the filled template as a plain string, newlines as \\n>",
-  "checklist_results": [
-    {{"item": "<text>", "result": "<YES/NO/PARTIAL/N/A>", "note": "<observation>"}}
-  ],
-  "universal_results": [
-    {{"item": "<text>", "result": "<YES/NO/PARTIAL/N/A>", "note": "<observation>"}}
-  ],
-  "red_flags_found": ["<flag>"],
-  "coaching_notes": ["<note1>", "<note2>", "<note3>"],
-  "strengths": ["<strength1>", "<strength2>"],
-  "summary": "<2-3 sentence summary>"
-}}"""
-
-    # ── Score ─────────────────────────────────────────────────────────────────
-    with st.spinner("🧠 Scoring against client criteria…"):
-        try:
-            resp = client_groq.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role":"user","content":prompt}],
-                temperature=0.1,
-                max_tokens=3000,
-            )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"): raw = raw[4:]
-            result = json.loads(raw)
-        except json.JSONDecodeError as e:
-            st.error(f"Parse error: {e}")
-            st.code(raw)
-            st.stop()
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
-            st.stop()
-
-    # ── Display ───────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("## 📊 Results")
-
-    score   = result.get("overall_score", 0)
-    flags   = result.get("red_flags_found", [])
-    disq    = result.get("disqualifier_triggered")
-    qualif  = result.get("qualified", False)
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Score",       f"{score}/100")
-    m2.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
-    m3.metric("Disposition", result.get("disposition_suggested","—"))
-    m4.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
-    st.progress(score / 100)
-
-    if disq:
-        st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
-
-    st.info(result.get("summary",""))
-
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📋 Lead Template", "✅ Checklist", "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript"
-    ])
-
-    # Tab 1 — Filled lead template
-    with tab1:
-        st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
-        filled = result.get("lead_template_filled", "Not available")
-        st.markdown(f'<div class="lead-template">{filled}</div>', unsafe_allow_html=True)
-        st.download_button(
-            "⬇️ Copy Lead Template (.txt)", data=filled,
-            file_name=f"lead_{agent_name or 'agent'}_{call_date}.txt", mime="text/plain"
-        )
-
-    # Tab 2 — Checklist
-    with tab2:
-        st.markdown(f'<div class="sec-hdr">Client Checklist — {criteria["framework"]}</div>', unsafe_allow_html=True)
-        for item in result.get("checklist_results", []):
-            r = item["result"]
-            badge_cls = {"YES":"badge-yes","NO":"badge-no","PARTIAL":"badge-part","N/A":"badge-na"}.get(r,"badge-na")
-            icon = {"YES":"✅","NO":"❌","PARTIAL":"⚠️","N/A":"➖"}.get(r,"➖")
-            st.markdown(f"""
+            # Tab 2 — Checklist
+            with tab2:
+                st.markdown(f'<div class="sec-hdr">Client Checklist — {criteria["framework"]}</div>', unsafe_allow_html=True)
+                for item in result.get("checklist_results", []):
+                    r = item["result"]
+                    badge_cls = {"YES": "badge-yes", "NO": "badge-no", "PARTIAL": "badge-part", "N/A": "badge-na"}.get(r, "badge-na")
+                    icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
+                    st.markdown(f"""
 <div class="chk-row">
   <span>{icon}</span>
   <span style="flex:1">{item['item']}<br>
@@ -380,57 +333,66 @@ Respond with this exact JSON:
   <span class="badge {badge_cls}">{r}</span>
 </div>""", unsafe_allow_html=True)
 
-        if show_universal:
-            st.markdown('<div class="sec-hdr">Universal Rules</div>', unsafe_allow_html=True)
-            for item in result.get("universal_results", []):
-                r    = item["result"]
-                icon = {"YES":"✅","NO":"❌","PARTIAL":"⚠️","N/A":"➖"}.get(r,"➖")
-                st.markdown(f"{icon} **{item['item']}** — <small style='color:#555'>{item.get('note','')}</small>",
-                            unsafe_allow_html=True)
+                if show_universal:
+                    st.markdown('<div class="sec-hdr">Universal Rules</div>', unsafe_allow_html=True)
+                    for item in result.get("universal_results", []):
+                        r = item["result"]
+                        icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
+                        st.markdown(
+                            f"{icon} **{item['item']}** — <small style='color:#555'>{item.get('note','')}</small>",
+                            unsafe_allow_html=True,
+                        )
 
-    # Tab 3 — Red flags + coaching
-    with tab3:
-        if flags:
-            st.markdown('<div class="sec-hdr">🚩 Red Flags Found</div>', unsafe_allow_html=True)
-            for f in flags:
-                st.markdown(f'<div class="redflag">🚩 {f}</div>', unsafe_allow_html=True)
-        else:
-            st.success("No red flags detected.")
+            # Tab 3 — Red flags + coaching
+            with tab3:
+                if flags:
+                    st.markdown('<div class="sec-hdr">🚩 Red Flags Found</div>', unsafe_allow_html=True)
+                    for f in flags:
+                        st.markdown(f'<div class="redflag">🚩 {f}</div>', unsafe_allow_html=True)
+                else:
+                    st.success("No red flags detected.")
 
-        st.markdown('<div class="sec-hdr">🎯 AI Coaching Notes</div>', unsafe_allow_html=True)
-        for note in result.get("coaching_notes", []):
-            st.markdown(f'<div class="coaching">💡 {note}</div>', unsafe_allow_html=True)
+                st.markdown('<div class="sec-hdr">🎯 AI Coaching Notes</div>', unsafe_allow_html=True)
+                for note in result.get("coaching_notes", []):
+                    st.markdown(f'<div class="coaching">💡 {note}</div>', unsafe_allow_html=True)
 
-        st.markdown(f'<div class="sec-hdr">📌 Standard Coaching — {client_name}</div>', unsafe_allow_html=True)
-        for point in criteria["coaching_focus"]:
-            st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sec-hdr">📌 Standard Coaching — {client_name}</div>', unsafe_allow_html=True)
+                for point in criteria["coaching_focus"]:
+                    st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
 
-    # Tab 4 — Strengths
-    with tab4:
-        for s in result.get("strengths", []):
-            st.markdown(f"✅ {s}")
-        if not result.get("strengths"):
-            st.info("No specific strengths identified.")
+            # Tab 4 — Strengths
+            with tab4:
+                for s in result.get("strengths", []):
+                    st.markdown(f"✅ {s}")
+                if not result.get("strengths"):
+                    st.info("No specific strengths identified.")
 
-    # Tab 5 — Transcript
-    with tab5:
-        if show_transcript:
-            st.markdown('<div class="sec-hdr">Transcript with Timestamps & Speakers</div>', unsafe_allow_html=True)
-            st.caption("🔵 Agent (Speaker 1) · 🟢 Prospect (Speaker 2) — speaker labels are estimated from pauses between segments")
-            st.markdown(f'<div class="transcript">{diarized_transcript}</div>', unsafe_allow_html=True)
-            st.download_button("⬇️ Transcript (.txt)", data=diarized_transcript,
-                file_name=f"transcript_{agent_name or 'agent'}_{call_date}.txt", mime="text/plain")
-        else:
-            st.info("Enable transcript in sidebar.")
+            # Tab 5 — Transcript
+            with tab5:
+                if show_transcript:
+                    st.markdown('<div class="sec-hdr">Transcript with Timestamps & Speakers</div>', unsafe_allow_html=True)
+                    st.caption("🔵 Agent (Speaker 1) · 🟢 Prospect (Speaker 2) — speaker labels are estimated from pauses between segments")
+                    st.markdown(f'<div class="transcript">{diarized_transcript}</div>', unsafe_allow_html=True)
+                    st.download_button(
+                        "⬇️ Transcript (.txt)", data=diarized_transcript,
+                        file_name=f"transcript_{safe_agent}_{call_date}.txt",
+                        mime="text/plain", key=f"dl_transcript_{file_idx}",
+                    )
+                else:
+                    st.info("Enable transcript in sidebar.")
 
-    if export_json:
-        export_data = {
-            "call_date": str(call_date), "agent": agent_name,
-            "client": client_name, "dialer": dialer_source,
-            "transcript": transcript_text, "analysis": result
-        }
-        st.download_button("⬇️ Full JSON Export", data=json.dumps(export_data, indent=2),
-            file_name=f"analysis_{agent_name or 'agent'}_{call_date}.json", mime="application/json")
+            if export_json:
+                export_data = {
+                    "call_date": str(call_date), "agent": agent_name,
+                    "client": client_name,
+                    "transcript": transcript_text, "analysis": result,
+                }
+                st.download_button(
+                    "⬇️ Full JSON Export",
+                    data=json.dumps(export_data, indent=2),
+                    file_name=f"analysis_{safe_agent}_{call_date}.json",
+                    mime="application/json", key=f"dl_json_{file_idx}",
+                )
 
     st.markdown("---")
     st.caption("MyVA Call Analyzer · Groq Whisper + LLaMA 3.3 · Built for Salma @ MyVA")
