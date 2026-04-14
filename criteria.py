@@ -389,6 +389,86 @@ CLIENT_CRITERIA = {
     },
 }
 
+# ─── Lead templates by type ──────────────────────────────────────────────────
+
+LEAD_TEMPLATES = {
+    "real_estate": """(Agent name and date)
+Temp:
+Lead Type:
+Seller Name:
+Address:
+Phone Number:
+Email:
+Motive/Pain:
+Actively Selling?
+List with Realtor?
+What if we didn't give them the price:
+Occupancy:
+Beds/Baths:
+Sqft:
+Condition/Repairs:
+Mortgage:
+Market Value:
+Asking Price:
+Timeline:
+Callback:
+Notes:
+Call Recording:""",
+
+    "business": """(Agent name and date)
+Temp: (Cold, Warm, Hot, Nurture, Networking etc.)
+
+Contact Info:
+  Contact Name:
+  Business Name:
+  Number:
+  Email:
+
+Business Details:
+  Business Address:
+  Nature of Business:
+  Number of Employees:
+  Est. Annual Revenue:
+  Best Time Window for Intro Call:
+  Notes:
+
+Call Recording:""",
+
+    "referral": """(Agent name and date)
+Temp:
+Contact Name:
+Facility Name:
+Facility Type:
+Owner Name:
+Owner Email:
+Owner Phone:
+Referral Source:
+Notes:
+Call Recording:""",
+}
+
+
+# ─── Whisper vocabulary prompt ───────────────────────────────────────────────
+
+WHISPER_VOCAB = (
+    "Real estate sales call. Terms: mortgage, equity, foreclosure, tax lien, "
+    "beds, baths, sqft, square feet, occupancy, owner-occupied, vacant, rental, "
+    "asking price, market value, Zillow, MLS, listing, realtor, cash offer, "
+    "closing costs, title, escrow, HOA, appraisal, inspection, earnest money, "
+    "pre-approval, down payment, refinance, short sale, wholesaler, ARV, "
+    "after repair value, CapEx, multifamily, duplex, triplex, fourplex, "
+    "senior housing, assisted living, memory care, "
+    "M&A, acquisition, revenue, EBITDA, SaaS, annual revenue, "
+    "ReSimpli, HubSpot, GHL, PhoneBurner, Call Tools, Enzo, "
+    "Rejigg, Loftey, Barracuda, Integrity, Haven Senior, Premier Site, Biancardi, "
+    "Smithton, Boone, CIC Partners, Real Broker NJ, Giancarlo, Shiraz, Stuart Moss. "
+    "Email addresses should be written as complete addresses like john@gmail.com, "
+    "not spelled out letter by letter."
+)
+
+
+# ─── Universal rules ────────────────────────────────────────────────────────
+
 UNIVERSAL_RULES = [
     "Did agent always ask for email on every call?",
     "Did agent always ask the referral question?",
