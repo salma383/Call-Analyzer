@@ -3,20 +3,28 @@ import json
 import os
 import datetime
 from groq import Groq
-from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
+from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES
 from utils import (
     sanitize_filename, hash_audio_file, transcribe_audio,
     build_scoring_prompt, score_transcript, chunk_transcript,
     merge_scoring_results, reconstruct_spelled_out, append_audit_log,
 )
 
-# ─── API Key ─────────────────────────────────────────────────────────────────
-try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-except (KeyError, FileNotFoundError):
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# ─── API Keys ────────────────────────────────────────────────────────────────
+def _get_secret(key):
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, "")
+
+GROQ_API_KEY = _get_secret("GROQ_API_KEY")
+AAI_API_KEY  = _get_secret("AAI_API_KEY")
+
 if not GROQ_API_KEY:
-    st.error("No Groq API key found. Add GROQ_API_KEY to Streamlit Secrets or environment.")
+    st.error("No Groq API key found. Add GROQ_API_KEY to Streamlit Secrets.")
+    st.stop()
+if not AAI_API_KEY:
+    st.error("No AssemblyAI API key found. Add AAI_API_KEY to Streamlit Secrets.")
     st.stop()
 
 # ─── Page config ─────────────────────────────────────────────────────────────
@@ -104,7 +112,7 @@ st.markdown("""
 st.markdown("""
 <div class="header-bar">
   <h1>📞 MyVA Call Analyzer</h1>
-  <p>Transcribe · Score · Extract Lead · Coach — powered by Groq</p>
+  <p>Transcribe · Score · Extract Lead · Coach — powered by AssemblyAI + Groq</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -182,8 +190,7 @@ if analyze_btn:
     safe_agent = sanitize_filename(agent_name)
 
     for file_idx, audio_file in enumerate(audio_files):
-        expanded = file_idx == 0
-        container = st.expander(f"Results: {audio_file.name}", expanded=expanded) if len(audio_files) > 1 else st.container()
+        container = st.expander(f"Results: {audio_file.name}", expanded=(file_idx == 0)) if len(audio_files) > 1 else st.container()
 
         with container:
             # ── Transcribe ────────────────────────────────────────────────
@@ -191,24 +198,24 @@ if analyze_btn:
             cache_key = f"transcript_{audio_hash}"
 
             if cache_key in st.session_state:
-                transcript_text, segments, diarized_transcript = st.session_state[cache_key]
+                transcript_text, utterances, diarized_transcript = st.session_state[cache_key]
                 st.info("Using cached transcript.")
             else:
-                with st.spinner("🎙️ Transcribing with Whisper…"):
+                with st.spinner("🎙️ Transcribing with AssemblyAI…"):
                     try:
-                        transcript_text, segments, diarized_transcript = transcribe_audio(
-                            client_groq, audio_file, WHISPER_VOCAB, WHISPER_HALLUCINATIONS
+                        transcript_text, utterances, diarized_transcript = transcribe_audio(
+                            AAI_API_KEY, audio_file
                         )
-                        st.session_state[cache_key] = (transcript_text, segments, diarized_transcript)
+                        st.session_state[cache_key] = (transcript_text, utterances, diarized_transcript)
                     except Exception as e:
                         st.error(f"Transcription failed: {e}")
                         continue
 
-            # Post-process spelled-out emails/addresses in transcript
+            # Post-process spelled-out emails/addresses
             transcript_text = reconstruct_spelled_out(transcript_text)
             diarized_transcript = reconstruct_spelled_out(diarized_transcript)
 
-            st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(segments) if segments else '?'} segments")
+            st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(utterances) if utterances else '?'} utterances")
 
             # ── Score (with chunking for long calls) ──────────────────────
             MAX_TRANSCRIPT_CHARS = 24000
@@ -249,7 +256,7 @@ if analyze_btn:
                     st.code(result.get("raw", ""))
                 continue
 
-            # Post-process filled template for spelled-out emails
+            # Post-process filled template
             if result.get("lead_template_filled"):
                 result["lead_template_filled"] = reconstruct_spelled_out(
                     result["lead_template_filled"]
@@ -268,7 +275,7 @@ if analyze_btn:
                     "audio_filename": audio_file.name,
                 })
             except Exception:
-                pass  # Don't break the app if logging fails
+                pass
 
             # ── Session history ───────────────────────────────────────────
             st.session_state.analysis_history.append({
@@ -309,7 +316,6 @@ if analyze_btn:
                 "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript",
             ])
 
-            # Tab 1 — Filled lead template
             with tab1:
                 st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
                 filled = result.get("lead_template_filled", "Not available")
@@ -320,7 +326,6 @@ if analyze_btn:
                     mime="text/plain", key=f"dl_lead_{file_idx}",
                 )
 
-            # Tab 2 — Checklist
             with tab2:
                 st.markdown(f'<div class="sec-hdr">Client Checklist — {criteria["framework"]}</div>', unsafe_allow_html=True)
                 for item in result.get("checklist_results", []):
@@ -346,7 +351,6 @@ if analyze_btn:
                             unsafe_allow_html=True,
                         )
 
-            # Tab 3 — Red flags + coaching
             with tab3:
                 if flags:
                     st.markdown('<div class="sec-hdr">🚩 Red Flags Found</div>', unsafe_allow_html=True)
@@ -363,18 +367,16 @@ if analyze_btn:
                 for point in criteria["coaching_focus"]:
                     st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
 
-            # Tab 4 — Strengths
             with tab4:
                 for s in result.get("strengths", []):
                     st.markdown(f"✅ {s}")
                 if not result.get("strengths"):
                     st.info("No specific strengths identified.")
 
-            # Tab 5 — Transcript
             with tab5:
                 if show_transcript:
                     st.markdown('<div class="sec-hdr">Transcript with Timestamps & Speakers</div>', unsafe_allow_html=True)
-                    st.caption("🔵 Agent (Speaker 1) · 🟢 Prospect (Speaker 2) — speaker labels are estimated from pauses between segments")
+                    st.caption("🔵 Agent (first speaker) · 🟢 Prospect — powered by AssemblyAI speaker diarization")
                     st.markdown(f'<div class="transcript">{diarized_transcript}</div>', unsafe_allow_html=True)
                     st.download_button(
                         "⬇️ Transcript (.txt)", data=diarized_transcript,
@@ -398,4 +400,4 @@ if analyze_btn:
                 )
 
     st.markdown("---")
-    st.caption("MyVA Call Analyzer · Groq Whisper + LLaMA 3.3 · Built for Salma @ MyVA")
+    st.caption("MyVA Call Analyzer · AssemblyAI + Groq LLaMA 3.3 · Built for Salma @ MyVA")

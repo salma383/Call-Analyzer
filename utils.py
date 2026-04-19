@@ -55,21 +55,19 @@ def call_with_retry(fn, *args, max_retries=3, **kwargs):
     raise last_exc
 
 
-# ─── Transcription ───────────────────────────────────────────────────────────
+# ─── Transcription (AssemblyAI — real speaker diarization) ──────────────────
 
-def _is_hallucination(text, hallucination_list):
-    """Check if a segment is a known Whisper hallucination."""
-    lower = text.lower().strip()
-    return any(h in lower for h in hallucination_list)
-
-
-def transcribe_audio(client_groq, audio_file, whisper_prompt="", hallucinations=None):
+def transcribe_audio(aai_api_key, audio_file):
     """
-    Transcribe audio via Groq Whisper, filter hallucinations, apply diarization.
-    Returns (transcript_text, segments, diarized_transcript).
+    Transcribe audio via AssemblyAI with real speaker diarization.
+    Returns (transcript_text, utterances, diarized_transcript).
+
+    Speakers are labeled A/B/C... by AssemblyAI. The first speaker
+    is assumed to be the Agent (they initiate the call).
     """
-    if hallucinations is None:
-        hallucinations = []
+    import assemblyai as aai
+
+    aai.settings.api_key = aai_api_key
 
     suffix = f".{audio_file.name.split('.')[-1]}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -77,56 +75,31 @@ def transcribe_audio(client_groq, audio_file, whisper_prompt="", hallucinations=
         tmp_path = tmp.name
 
     try:
-        with open(tmp_path, "rb") as f:
-            transcription = call_with_retry(
-                client_groq.audio.transcriptions.create,
-                file=(audio_file.name, f.read()),
-                model="whisper-large-v3",
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-                language="en",
-                prompt=whisper_prompt,
-                temperature=0.0,
-            )
+        config = aai.TranscriptionConfig(
+            speaker_labels=True,
+            language_code="en",
+        )
+        transcriber = aai.Transcriber()
+        transcript = transcriber.transcribe(tmp_path, config=config)
 
-        segments = getattr(transcription, "segments", [])
+        if transcript.status == aai.TranscriptStatus.error:
+            raise RuntimeError(f"AssemblyAI error: {transcript.error}")
 
-        # Filter out hallucinated segments
-        clean_segments = []
-        for seg in segments:
-            text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
-            if text and not _is_hallucination(text, hallucinations):
-                clean_segments.append(seg)
+        # Plain text for LLM scoring
+        transcript_text = transcript.text or ""
 
-        # Rebuild plain text from clean segments
-        clean_texts = []
-        for seg in clean_segments:
-            text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
-            if text:
-                clean_texts.append(text)
-        transcript_text = " ".join(clean_texts) if clean_texts else transcription.text
-
-        # Speaker diarization heuristic — gap > 0.6s = speaker switch
-        PAUSE_THRESHOLD = 0.6
-        current_speaker = 1
+        # Build diarized transcript from utterances
+        utterances = transcript.utterances or []
+        first_speaker = utterances[0].speaker if utterances else "A"
         diarized_lines = []
-        prev_end = 0.0
 
-        for seg in clean_segments:
-            start = seg.get("start", 0) if isinstance(seg, dict) else getattr(seg, "start", 0)
-            end = seg.get("end", 0) if isinstance(seg, dict) else getattr(seg, "end", 0)
-            text = (seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")).strip()
-            if not text:
-                continue
-            gap = start - prev_end
-            if prev_end > 0 and gap > PAUSE_THRESHOLD:
-                current_speaker = 2 if current_speaker == 1 else 1
-            mins = int(start) // 60
-            secs = int(start) % 60
+        for utt in utterances:
+            start_ms = utt.start
+            mins = (start_ms // 1000) // 60
+            secs = (start_ms // 1000) % 60
             ts = f"{mins:02d}:{secs:02d}"
-            label = "Agent" if current_speaker == 1 else "Prospect"
-            diarized_lines.append(f"[{ts}] {label}: {text}")
-            prev_end = end
+            label = "Agent" if utt.speaker == first_speaker else "Prospect"
+            diarized_lines.append(f"[{ts}] {label}: {utt.text}")
 
         diarized_transcript = "\n".join(diarized_lines) if diarized_lines else transcript_text
 
@@ -134,7 +107,7 @@ def transcribe_audio(client_groq, audio_file, whisper_prompt="", hallucinations=
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-    return transcript_text, segments, diarized_transcript
+    return transcript_text, utterances, diarized_transcript
 
 
 # ─── Spelled-out email / address reconstruction ──────────────────────────────
