@@ -243,10 +243,17 @@ def build_scoring_prompt(client_name, criteria, agent_name, call_date,
     return f"""You are an expert call quality analyst for MyVA.
 Analyze this transcript and respond ONLY in valid JSON (no markdown, no preamble).
 
-CLIENT: {client_name}
+CLIENT LABEL (the company/account being serviced — NOT the prospect): {client_name}
 FRAMEWORK: {criteria['framework']}
-AGENT: {agent_name or 'Unknown'}
+AGENT (the MyVA rep making the call — NOT the prospect): {agent_name or 'Unknown'}
 SCRIPT NOTES: {criteria['script_notes']}
+
+CRITICAL — CONTACT NAME BOUNDARY:
+The "Contact Name" / "Prospect Name" / "Owner Name" field in the lead template refers to
+the PROSPECT (the person being called — the business owner, homeowner, etc.).
+It is NEVER the client label above ("{client_name}") and NEVER the agent name ("{agent_name or 'Unknown'}").
+If the prospect's name is not clearly stated in the transcript, write "Not captured".
+Do NOT copy the client label or agent name into the contact field.
 
 --- TRANSCRIPT ---
 {transcript_text}
@@ -300,6 +307,35 @@ Another example:
   Transcript: "j as in john, o, h, n at yahoo dot com"
   Letters: j, o, h, n → "john"
   FINAL: john@yahoo.com
+
+CRITICAL — ASR-MANGLED GMAIL ADDRESSES:
+Speech recognition often mangles "gmail.com" into fragments. Recognize these patterns:
+- A lone word "Mail" (capitalized, often after a period) with no preceding "G" is almost
+  always "gmail" where the "G" got dropped. Treat "... Mail." or "... Mail " as "@gmail.com".
+- "G mail" with a space → "gmail"
+- No explicit "dot com" spoken near "mail" → still assume ".com"
+
+CRITICAL — CONCATENATED LOCAL-PARTS SPLIT BY ASR:
+Email local-parts are often single runs of letters/digits (e.g. jimmcarrincorporated),
+but ASR splits them into separate Title-Cased words (e.g. "Jim Carr Incorporated").
+When you see a sequence of Title-Cased tokens and/or digits immediately followed by
+"Mail" / "gmail" / "@" / "at gmail":
+- Concatenate ALL those tokens (including leading digits) into one lowercase local-part.
+- Do NOT treat leading digits as an address/order number if they flow directly into the name.
+- Do NOT split the concatenation with dots or dashes.
+- Do NOT invent a new TLD — if only "mail" is mentioned, use ".com".
+
+Worked example:
+  Transcript: "Send it to 3308 Jim Carr Incorporated. Mail."
+  Tokens before "Mail": 3308, Jim, Carr, Incorporated
+  Concatenate lowercase: "3308jimcarrincorporated"
+  "Mail" (no preceding G) → "@gmail.com"
+  FINAL: 3308jimcarrincorporated@gmail.com
+  (NOT jimcarr@incorporated.com — "Incorporated" is part of the local-part, not a domain.)
+
+If spelling was also given earlier in the transcript (e.g. "J-I-M-M-C-A-R-R, double M, double R"),
+prefer the spelled letters over the ASR Title-Case guess. Double-letter phrases like
+"double M" mean two M's, "double R" means two R's.
 
 Respond with this exact JSON:
 {{

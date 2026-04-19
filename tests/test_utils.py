@@ -8,7 +8,7 @@ from io import BytesIO
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES, WHISPER_VOCAB
-from utils import sanitize_filename, hash_audio_file, chunk_transcript, reconstruct_spelled_out
+from utils import sanitize_filename, hash_audio_file, chunk_transcript, reconstruct_spelled_out, build_scoring_prompt
 
 
 # ── criteria.py data integrity ───────────────────────────────────────────────
@@ -188,3 +188,40 @@ def test_reconstruct_phonetic_for_and_like():
     result = reconstruct_spelled_out(text)
     assert "Bravo" not in result
     assert "Echo" not in result
+
+
+# ── scoring prompt rules (gmail / contact-name boundary) ─────────────────────
+
+def _sample_criteria():
+    return {
+        "framework": "X",
+        "script_notes": "Y",
+        "checklist": ["a"],
+        "red_flags": ["b"],
+        "hard_disqualifiers": ["c"],
+    }
+
+
+def test_prompt_includes_contact_name_boundary():
+    p = build_scoring_prompt(
+        "Stuart Moss / CIC Partners", _sample_criteria(),
+        "Marie", "2026-04-19", "transcript", "template", ["rule1"],
+    )
+    # Must warn that client label is not the prospect
+    assert "Stuart Moss / CIC Partners" in p
+    assert "NEVER" in p
+    assert "Not captured" in p
+    # Must mention the specific agent name as not-prospect
+    assert "Marie" in p
+
+
+def test_prompt_includes_gmail_reconstruction_rule():
+    p = build_scoring_prompt(
+        "Client", _sample_criteria(),
+        "Agent", "2026-04-19", "transcript", "template", ["rule1"],
+    )
+    # Must teach gmail heuristic and concatenation
+    assert "gmail" in p.lower()
+    assert "3308jimcarrincorporated@gmail.com" in p
+    # Must explicitly reject the bad output
+    assert "jimcarr@incorporated.com" in p
