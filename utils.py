@@ -59,15 +59,19 @@ def call_with_retry(fn, *args, max_retries=3, **kwargs):
 
 def transcribe_audio(aai_api_key, audio_file):
     """
-    Transcribe audio via AssemblyAI with real speaker diarization.
+    Transcribe audio via AssemblyAI REST API with real speaker diarization.
     Returns (transcript_text, utterances, diarized_transcript).
 
     Speakers are labeled A/B/C... by AssemblyAI. The first speaker
     is assumed to be the Agent (they initiate the call).
-    """
-    import assemblyai as aai
 
-    aai.settings.api_key = aai_api_key
+    Uses raw HTTP (not the SDK) because the SDK is out of sync with
+    the current API schema (speech_models plural).
+    """
+    import httpx
+
+    base_url = "https://api.assemblyai.com/v2"
+    headers = {"authorization": aai_api_key}
 
     suffix = f".{audio_file.name.split('.')[-1]}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -75,32 +79,61 @@ def transcribe_audio(aai_api_key, audio_file):
         tmp_path = tmp.name
 
     try:
-        config = aai.TranscriptionConfig(
-            speaker_labels=True,
-            language_code="en",
-            speech_model=aai.SpeechModel.best,
+        # 1. Upload file
+        with open(tmp_path, "rb") as f:
+            upload_resp = httpx.post(
+                f"{base_url}/upload",
+                headers=headers,
+                content=f.read(),
+                timeout=300.0,
+            )
+        upload_resp.raise_for_status()
+        audio_url = upload_resp.json()["upload_url"]
+
+        # 2. Submit transcription job
+        submit_resp = httpx.post(
+            f"{base_url}/transcript",
+            headers=headers,
+            json={
+                "audio_url": audio_url,
+                "speaker_labels": True,
+                "language_code": "en",
+                "speech_models": ["universal-2"],
+            },
+            timeout=60.0,
         )
-        transcriber = aai.Transcriber()
-        transcript = transcriber.transcribe(tmp_path, config=config)
+        submit_resp.raise_for_status()
+        transcript_id = submit_resp.json()["id"]
 
-        if transcript.status == aai.TranscriptStatus.error:
-            raise RuntimeError(f"AssemblyAI error: {transcript.error}")
+        # 3. Poll for completion
+        while True:
+            poll_resp = httpx.get(
+                f"{base_url}/transcript/{transcript_id}",
+                headers=headers,
+                timeout=60.0,
+            )
+            poll_resp.raise_for_status()
+            data = poll_resp.json()
+            status = data.get("status")
+            if status == "completed":
+                break
+            if status == "error":
+                raise RuntimeError(f"AssemblyAI error: {data.get('error')}")
+            time.sleep(3)
 
-        # Plain text for LLM scoring
-        transcript_text = transcript.text or ""
+        transcript_text = data.get("text") or ""
+        utterances = data.get("utterances") or []
 
-        # Build diarized transcript from utterances
-        utterances = transcript.utterances or []
-        first_speaker = utterances[0].speaker if utterances else "A"
+        # Build diarized transcript
+        first_speaker = utterances[0]["speaker"] if utterances else "A"
         diarized_lines = []
-
         for utt in utterances:
-            start_ms = utt.start
+            start_ms = utt.get("start", 0)
             mins = (start_ms // 1000) // 60
             secs = (start_ms // 1000) % 60
             ts = f"{mins:02d}:{secs:02d}"
-            label = "Agent" if utt.speaker == first_speaker else "Prospect"
-            diarized_lines.append(f"[{ts}] {label}: {utt.text}")
+            label = "Agent" if utt["speaker"] == first_speaker else "Prospect"
+            diarized_lines.append(f"[{ts}] {label}: {utt['text']}")
 
         diarized_transcript = "\n".join(diarized_lines) if diarized_lines else transcript_text
 
