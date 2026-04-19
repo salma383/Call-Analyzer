@@ -156,3 +156,35 @@ def test_reconstruct_at_dot_in_email():
     text = "email me at john at gmail dot com"
     result = reconstruct_spelled_out(text)
     assert "john@gmail.com" in result
+
+
+# ── phonetic alphabet decoding ───────────────────────────────────────────────
+
+def test_reconstruct_phonetic_alphabet_single_letters():
+    text = "N as in Nancy, T as in Tom"
+    result = reconstruct_spelled_out(text)
+    assert "Nancy" not in result
+    assert "Tom" not in result
+
+
+def test_reconstruct_phonetic_letter_group():
+    text = "EESE as in Earl"
+    result = reconstruct_spelled_out(text)
+    assert "EESE" in result
+    assert "Earl" not in result
+
+
+def test_reconstruct_phonetic_glued_asr_case():
+    """The real failing case: ASR glued 'tom' with '85@gmail.com'."""
+    text = "MCC L, EESE as in Earl, N as in Nancy, t as in tom85@gmail.com"
+    result = reconstruct_spelled_out(text)
+    assert "85@gmail.com" in result
+    assert "Earl" not in result
+    assert "Nancy" not in result
+
+
+def test_reconstruct_phonetic_for_and_like():
+    text = "B for Bravo, E like Echo"
+    result = reconstruct_spelled_out(text)
+    assert "Bravo" not in result
+    assert "Echo" not in result

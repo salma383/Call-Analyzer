@@ -155,6 +155,23 @@ def reconstruct_spelled_out(text: str) -> str:
     if not text:
         return text
 
+    # Step 0a: Strip phonetic alphabet — "X as in Word" / "X for Word" / "X like Word" → "X"
+    # Handles "N as in Nancy" → "N" and the ASR-glued case "t as in tom85@gmail.com" → "t85@gmail.com"
+    text = re.sub(
+        r'\b([A-Za-z])\s+(?:as in|for|like)\s+[A-Za-z]+',
+        r'\1',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Step 0b: Strip phonetic clarifier after multi-letter groups — "EESE as in Earl" → "EESE"
+    text = re.sub(
+        r'\b([A-Za-z]{2,})\s+(?:as in|for|like)\s+[A-Za-z]+',
+        r'\1',
+        text,
+        flags=re.IGNORECASE,
+    )
+
     # Step 1: Fix spelled-out emails
     # Pattern: single chars separated by spaces, followed by "at" and domain parts
     # Match: "s a l m a at g m a i l dot c o m" or "s a l m a at gmail dot com"
@@ -257,6 +274,32 @@ Instructions for lead template:
 - For Call Recording: leave as "[Paste link here]"
 - Preserve the exact template structure including all labels
 - Write email addresses as complete addresses (e.g. salma@gmail.com), never spelled out letter by letter
+
+CRITICAL — DECODING SPELLED-OUT EMAILS:
+When a prospect spells an email, apply these rules strictly:
+1. "X as in Word" or "X for Word" or "X like Word" means ONLY the letter X — discard the reference word.
+   Example: "N as in Nancy" → N    "T for Tango" → T
+2. Letter groups like "MCC" or "EESE" mean each letter separately — keep every letter.
+   Example: "MCC" → M, C, C    "EESE" → E, E, S, E
+3. Concatenate ALL letters (and digits) spelled before "@" into the username. Ignore commas/spaces between letters.
+4. If the transcript contains a typo-like guess at the start (e.g. "McLease.") followed by the spelling, IGNORE the guess and use ONLY the spelled letters.
+5. Lowercase the final email address.
+
+Worked example:
+  Transcript: "Yes, it's McLease. MCC L, EESE as in Earl, N as in Nancy, T as in Tom 85 at gmail dot com"
+  Discard "McLease" (initial guess). Collect spelled letters in order:
+    MCC → m,c,c
+    L   → l
+    EESE (clarified by "as in Earl") → e,e,s,e
+    N (as in Nancy) → n
+    T (as in Tom) → t
+  Followed by "85 at gmail dot com" → "85@gmail.com"
+  FINAL: mccleesent85@gmail.com
+
+Another example:
+  Transcript: "j as in john, o, h, n at yahoo dot com"
+  Letters: j, o, h, n → "john"
+  FINAL: john@yahoo.com
 
 Respond with this exact JSON:
 {{
