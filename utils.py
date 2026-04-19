@@ -78,7 +78,7 @@ def transcribe_audio(aai_api_key, audio_file):
         config = aai.TranscriptionConfig(
             speaker_labels=True,
             language_code="en",
-            speech_model="universal-2",
+            speech_model=aai.SpeechModel.best,
         )
         transcriber = aai.Transcriber()
         transcript = transcriber.transcribe(tmp_path, config=config)
