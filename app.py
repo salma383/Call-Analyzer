@@ -18,13 +18,9 @@ def _get_secret(key):
         return os.environ.get(key, "")
 
 GROQ_API_KEY = _get_secret("GROQ_API_KEY")
-AAI_API_KEY  = _get_secret("AAI_API_KEY")
 
 if not GROQ_API_KEY:
     st.error("No Groq API key found. Add GROQ_API_KEY to Streamlit Secrets.")
-    st.stop()
-if not AAI_API_KEY:
-    st.error("No AssemblyAI API key found. Add AAI_API_KEY to Streamlit Secrets.")
     st.stop()
 
 # ─── Page config ─────────────────────────────────────────────────────────────
@@ -112,7 +108,7 @@ st.markdown("""
 st.markdown("""
 <div class="header-bar">
   <h1>📞 MyVA Call Analyzer</h1>
-  <p>Transcribe · Score · Extract Lead · Coach — powered by AssemblyAI + Groq</p>
+  <p>Transcribe · Score · Extract Lead · Coach — powered by Groq Whisper + LLaMA 3.3</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -201,10 +197,10 @@ if analyze_btn:
                 transcript_text, utterances, diarized_transcript = st.session_state[cache_key]
                 st.info("Using cached transcript.")
             else:
-                with st.spinner("🎙️ Transcribing with AssemblyAI…"):
+                with st.spinner("🎙️ Transcribing with Groq Whisper…"):
                     try:
                         transcript_text, utterances, diarized_transcript = transcribe_audio(
-                            AAI_API_KEY, audio_file
+                            client_groq, audio_file
                         )
                         st.session_state[cache_key] = (transcript_text, utterances, diarized_transcript)
                     except Exception as e:
@@ -215,7 +211,7 @@ if analyze_btn:
             transcript_text = reconstruct_spelled_out(transcript_text)
             diarized_transcript = reconstruct_spelled_out(diarized_transcript)
 
-            st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(utterances) if utterances else '?'} utterances")
+            st.success(f"✅ Transcribed — {len(transcript_text.split())} words · {len(utterances) if utterances else '?'} segments")
 
             # ── Score (with chunking for long calls) ──────────────────────
             MAX_TRANSCRIPT_CHARS = 24000
@@ -375,8 +371,8 @@ if analyze_btn:
 
             with tab5:
                 if show_transcript:
-                    st.markdown('<div class="sec-hdr">Transcript with Timestamps & Speakers</div>', unsafe_allow_html=True)
-                    st.caption("🔵 Agent (first speaker) · 🟢 Prospect — powered by AssemblyAI speaker diarization")
+                    st.markdown('<div class="sec-hdr">Transcript with Timestamps</div>', unsafe_allow_html=True)
+                    st.caption("Segments with start timestamps — Groq Whisper (no speaker diarization)")
                     st.markdown(f'<div class="transcript">{diarized_transcript}</div>', unsafe_allow_html=True)
                     st.download_button(
                         "⬇️ Transcript (.txt)", data=diarized_transcript,
@@ -400,4 +396,4 @@ if analyze_btn:
                 )
 
     st.markdown("---")
-    st.caption("MyVA Call Analyzer · AssemblyAI + Groq LLaMA 3.3 · Built for Salma @ MyVA")
+    st.caption("MyVA Call Analyzer · Groq Whisper + LLaMA 3.3 · Built for Salma @ MyVA")

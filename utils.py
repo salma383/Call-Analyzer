@@ -55,93 +55,77 @@ def call_with_retry(fn, *args, max_retries=3, **kwargs):
     raise last_exc
 
 
-# ─── Transcription (AssemblyAI — real speaker diarization) ──────────────────
+# ─── Transcription (Groq Whisper) ────────────────────────────────────────────
 
-def transcribe_audio(aai_api_key, audio_file):
+# Phonetic-aware Whisper prompt: domain vocab + spelling guidance.
+# Whisper uses the prompt as style/context hints, not as instructions.
+# Keeping it to example phrases helps it transcribe similar speech accurately.
+_WHISPER_PROMPT = (
+    "Real estate and business acquisition sales call. "
+    "Vocab: mortgage, equity, foreclosure, tax lien, sqft, owner-occupied, "
+    "Zillow, MLS, realtor, cash offer, escrow, HOA, appraisal, earnest money, "
+    "refinance, ARV, EBITDA, ReSimpli, HubSpot, GHL, Call Tools, Enzo, "
+    "Rejigg, Loftey, Barracuda, Integrity, Haven Senior, Biancardi, "
+    "Smithton, Boone, CIC Partners, Giancarlo, Shiraz, Stuart Moss. "
+    "Prospects often spell their name and email letter by letter, "
+    "sometimes using phonetic alphabet: 'N as in Nancy', 'T as in Tom', "
+    "'J for Juliet'. They may say 'at gmail dot com' for @gmail.com. "
+    "Example: MCC L, EESE as in Earl, N as in Nancy, T as in Tom 85 at gmail dot com."
+)
+
+
+def transcribe_audio(client_groq, audio_file):
     """
-    Transcribe audio via AssemblyAI REST API with real speaker diarization.
-    Returns (transcript_text, utterances, diarized_transcript).
+    Transcribe audio via Groq Whisper (whisper-large-v3).
+    Returns (transcript_text, segments, display_transcript).
 
-    Speakers are labeled A/B/C... by AssemblyAI. The first speaker
-    is assumed to be the Agent (they initiate the call).
-
-    Uses raw HTTP (not the SDK) because the SDK is out of sync with
-    the current API schema (speech_models plural).
+    Whisper has no speaker diarization, so `display_transcript` is the
+    plain text (optionally with segment timestamps). `segments` is the
+    list of verbose_json segments (may be empty).
     """
-    import httpx
-
-    base_url = "https://api.assemblyai.com/v2"
-    headers = {"authorization": aai_api_key}
-
     suffix = f".{audio_file.name.split('.')[-1]}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_file.read())
         tmp_path = tmp.name
 
     try:
-        # 1. Upload file
         with open(tmp_path, "rb") as f:
-            upload_resp = httpx.post(
-                f"{base_url}/upload",
-                headers=headers,
-                content=f.read(),
-                timeout=300.0,
+            resp = call_with_retry(
+                client_groq.audio.transcriptions.create,
+                file=(os.path.basename(tmp_path), f.read()),
+                model="whisper-large-v3",
+                prompt=_WHISPER_PROMPT,
+                response_format="verbose_json",
+                temperature=0.0,
+                language="en",
             )
-        upload_resp.raise_for_status()
-        audio_url = upload_resp.json()["upload_url"]
-
-        # 2. Submit transcription job
-        submit_resp = httpx.post(
-            f"{base_url}/transcript",
-            headers=headers,
-            json={
-                "audio_url": audio_url,
-                "speaker_labels": True,
-                "language_code": "en",
-                "speech_models": ["universal-2"],
-            },
-            timeout=60.0,
-        )
-        submit_resp.raise_for_status()
-        transcript_id = submit_resp.json()["id"]
-
-        # 3. Poll for completion
-        while True:
-            poll_resp = httpx.get(
-                f"{base_url}/transcript/{transcript_id}",
-                headers=headers,
-                timeout=60.0,
-            )
-            poll_resp.raise_for_status()
-            data = poll_resp.json()
-            status = data.get("status")
-            if status == "completed":
-                break
-            if status == "error":
-                raise RuntimeError(f"AssemblyAI error: {data.get('error')}")
-            time.sleep(3)
-
-        transcript_text = data.get("text") or ""
-        utterances = data.get("utterances") or []
-
-        # Build diarized transcript
-        first_speaker = utterances[0]["speaker"] if utterances else "A"
-        diarized_lines = []
-        for utt in utterances:
-            start_ms = utt.get("start", 0)
-            mins = (start_ms // 1000) // 60
-            secs = (start_ms // 1000) % 60
-            ts = f"{mins:02d}:{secs:02d}"
-            label = "Agent" if utt["speaker"] == first_speaker else "Prospect"
-            diarized_lines.append(f"[{ts}] {label}: {utt['text']}")
-
-        diarized_transcript = "\n".join(diarized_lines) if diarized_lines else transcript_text
-
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-    return transcript_text, utterances, diarized_transcript
+    # Groq SDK returns a pydantic-like object; access via attribute or dict
+    def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    transcript_text = (_get(resp, "text", "") or "").strip()
+    segments = _get(resp, "segments", []) or []
+
+    # Build a timestamped display transcript from segments if available
+    display_lines = []
+    for seg in segments:
+        start = _get(seg, "start", 0) or 0
+        text = (_get(seg, "text", "") or "").strip()
+        if not text:
+            continue
+        mins = int(start) // 60
+        secs = int(start) % 60
+        display_lines.append(f"[{mins:02d}:{secs:02d}] {text}")
+
+    display_transcript = "\n".join(display_lines) if display_lines else transcript_text
+
+    return transcript_text, segments, display_transcript
 
 
 # ─── Spelled-out email / address reconstruction ──────────────────────────────
