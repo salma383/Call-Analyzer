@@ -185,71 +185,6 @@ CLIENT_CRITERIA = {
         "script_notes": "Focus areas: St. Louis, Columbia, Jefferson City. NOT a wholesaler — they close deals themselves.",
     },
 
-    "Integrity (RE Sellers)": {
-        "type": "real_estate",
-        "template_type": "smithton",
-        "dialer": "Call Tools",
-        "agent": "Menna",
-        "framework": "Cash Buyer Qualification",
-        "checklist": [
-            "Did agent confirm owner name and property address?",
-            "Did agent gauge selling interest?",
-            "Did agent ask about property details (beds/baths/sqft)?",
-            "Did agent explain cash offer benefits (no repairs, no commissions, fast close)?",
-            "Did agent ask about mortgage balance / equity?",
-            "Did agent get motivation?",
-            "Did agent schedule specific callback date/time?",
-            "Did agent get email?",
-        ],
-        "hard_disqualifiers": [
-            "Won't consider below-market cash offer AND won't list",
-            "No equity (mortgage too high)",
-        ],
-        "red_flags": [
-            "Agent skipped mortgage / equity question",
-            "Agent gave up without setting specific callback",
-            "Agent didn't explain cash offer advantages",
-        ],
-        "coaching_focus": [
-            "Foreclosure leads: show empathy + mention limited time before auction",
-            "Tax lien leads: explain you'll pay off back taxes at closing",
-            "Inherited property: emphasize avoiding headache of maintenance",
-            "ALWAYS end with specific callback date — motivated sellers go cold fast",
-        ],
-        "script_notes": "Website: integritylps.com. Submit via ReSimpli link.",
-    },
-
-    "Integrity (Buyers Camp)": {
-        "type": "business",
-        "template_type": "buyers",
-        "dialer": "Call Tools",
-        "agent": "Menna",
-        "framework": "Investor Buyer List Building",
-        "checklist": [
-            "Did agent confirm prospect owns multiple properties?",
-            "Did agent ask if they're looking to acquire more?",
-            "Did agent get state + city (minimum required)?",
-            "Did agent get property type?",
-            "Did agent ask about specific zip codes (for major cities)?",
-            "Did agent ask about property manager interest?",
-            "Did agent ask about insurance review interest?",
-        ],
-        "hard_disqualifiers": [
-            "Only owns one property",
-            "Not looking to acquire more",
-        ],
-        "red_flags": [
-            "Agent didn't get state + city (minimum info)",
-            "Agent treated this like a seller call",
-        ],
-        "coaching_focus": [
-            "This is a BUYER list — you're building Integrity's acquisition pipeline",
-            "Minimum: state + city + property type. Always try for more.",
-            "For big cities: get specific zip codes",
-        ],
-        "script_notes": "Opening: 'I noticed from public records you own multiple properties...'",
-    },
-
     "Scott Fuller / Haven Senior": {
         "type": "referral",
         "template_type": "scott",
@@ -543,28 +478,6 @@ Notes:
 
 Call Recording: [Paste link here]""",
 
-    "buyers": """(Agent name and date)
-Temp:
-
-Contact Info:
-  Name:
-  Number:
-  Email:
-  Address:
-
-Buyer Criteria:
-  State:
-  City / Area:
-  Property Type:
-  Zip Codes (if major city):
-  Looking to Acquire More:
-
-Additional Services:
-  Property Manager Interest:
-  Insurance Review Interest:
-
-Notes:
-Call Recording: [Paste link here]""",
 }
 
 
