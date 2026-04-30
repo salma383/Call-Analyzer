@@ -3,6 +3,7 @@ MyVA Call Analyzer — utility functions.
 Transcription (Groq Whisper), scoring (GPT-4.1-mini), email extraction,
 temperature determination, audit logging.
 """
+from __future__ import annotations  # allows str | None on Python 3.9
 
 import hashlib
 import json
