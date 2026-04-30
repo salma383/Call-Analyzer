@@ -1,6 +1,8 @@
+from __future__ import annotations
 import streamlit as st
 import json
 import os
+import re
 import datetime
 import threading
 from groq import Groq
@@ -15,7 +17,7 @@ from utils import (
     _looks_like_spelled_email, build_labeled_transcript, recalculate_temp,
 )
 
-# ─── Page config (MUST be first Streamlit call) ───────────────────────────────
+# ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MyVA Call Analyzer", page_icon="📞", layout="wide")
 
 
@@ -46,11 +48,11 @@ if not OPENAI_API_KEY:
     st.stop()
 
 
-# ─── Session state init ───────────────────────────────────────────────────────
+# ─── Session state ────────────────────────────────────────────────────────────
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = []   # list of result dicts, one per file
 if "analysis_history" not in st.session_state:
     st.session_state.analysis_history = []
-if "results_store" not in st.session_state:
-    st.session_state.results_store = {}   # keyed by audio hash
 
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
@@ -64,7 +66,6 @@ st.markdown("""
   }
   .header-bar h1 { margin: 0; font-size: 1.8rem; color: white; }
   .header-bar p  { margin: 0.3rem 0 0; opacity: 0.75; font-size: 0.88rem; color: #ccc; }
-
   [data-testid="metric-container"] {
     background: white; border-radius: 10px;
     padding: 1rem; border: 1px solid #e0e0e0;
@@ -109,15 +110,15 @@ st.markdown("""
   }
   .snap-card p { margin:0.2rem 0; font-size:0.88rem; color:#1a1a1a; }
   .temp-hot     { background:#e8f5e9; color:#1b5e20; border-radius:8px;
-    padding:0.5rem 1rem; font-weight:700; display:inline-block; }
+    padding:0.5rem 1.2rem; font-weight:700; font-size:1.1rem; display:inline-block; }
   .temp-warm    { background:#fff3e0; color:#e65100; border-radius:8px;
-    padding:0.5rem 1rem; font-weight:700; display:inline-block; }
+    padding:0.5rem 1.2rem; font-weight:700; font-size:1.1rem; display:inline-block; }
   .temp-cold    { background:#e3f2fd; color:#0d47a1; border-radius:8px;
-    padding:0.5rem 1rem; font-weight:700; display:inline-block; }
+    padding:0.5rem 1.2rem; font-weight:700; font-size:1.1rem; display:inline-block; }
   .temp-nurture { background:#f3e5f5; color:#6a1b9a; border-radius:8px;
-    padding:0.5rem 1rem; font-weight:700; display:inline-block; }
-  .temp-pending { background:#fafafa; color:#555; border:1px dashed #aaa;
-    border-radius:8px; padding:0.5rem 1rem; font-weight:600; display:inline-block; }
+    padding:0.5rem 1.2rem; font-weight:700; font-size:1.1rem; display:inline-block; }
+  .temp-unknown { background:#fafafa; color:#555; border:1px dashed #aaa;
+    border-radius:8px; padding:0.5rem 1.2rem; font-weight:600; font-size:1.1rem; display:inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -126,7 +127,7 @@ st.markdown("""
 st.markdown("""
 <div class="header-bar">
   <h1>📞 MyVA Call Analyzer</h1>
-  <p>Transcribe · Score · Extract Lead · Coach · Temperature — powered by Groq Whisper + GPT-4.1-mini</p>
+  <p>Transcribe · Score · Extract Lead · Coach · Temperature — Groq Whisper + GPT-4.1-mini</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -141,12 +142,12 @@ with st.sidebar:
     st.markdown("### 🎚️ Options")
     show_transcript = st.checkbox("Show full transcript", value=True)
     show_universal  = st.checkbox("Universal rules check", value=True)
-    export_json     = st.checkbox("Enable JSON export",   value=False)
+    export_json     = st.checkbox("Enable JSON export", value=False)
 
     if st.session_state.analysis_history:
         st.markdown("---")
         st.markdown("### 📊 Past Analyses")
-        for h in reversed(st.session_state.analysis_history):
+        for h in reversed(st.session_state.analysis_history[-10:]):
             st.markdown(
                 f"**{h['agent']}** — {h['client']} — "
                 f"{h['score']}/100 ({h['timestamp']})"
@@ -197,314 +198,337 @@ if analyze_btn:
         st.error("Please upload a call recording.")
         st.stop()
 
+    st.session_state.analysis_results = []   # clear previous run
+
     client_groq   = Groq(api_key=GROQ_API_KEY)
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     criteria      = CLIENT_CRITERIA[client_name]
-    # Use specific template_type first (e.g. "smithton", "jordyn"), fall back to type
     template_key  = criteria.get("template_type", criteria.get("type", "real_estate"))
     template      = LEAD_TEMPLATES.get(template_key, LEAD_TEMPLATES["listing"])
     safe_agent    = sanitize_filename(agent_name)
+    is_re         = criteria.get("type") == "real_estate"
 
     for file_idx, audio_file in enumerate(audio_files):
-        container = (
-            st.expander(f"Results: {audio_file.name}", expanded=(file_idx == 0))
-            if len(audio_files) > 1 else st.container()
+        st.markdown(f"#### Analyzing: {audio_file.name}")
+
+        phone_number = extract_phone_from_filename(audio_file.name)
+        audio_hash   = hash_audio_file(audio_file)
+        cache_key    = f"transcript_{audio_hash}"
+
+        if cache_key in st.session_state:
+            transcript_text, utterances, stamped_transcript = st.session_state[cache_key]
+            st.info("Using cached transcript.")
+        else:
+            with st.spinner("🎙️ Transcribing with Groq Whisper…"):
+                try:
+                    transcript_text, utterances, stamped_transcript = transcribe_audio(
+                        client_groq, audio_file
+                    )
+                    st.session_state[cache_key] = (transcript_text, utterances, stamped_transcript)
+                except Exception as e:
+                    st.error(f"Transcription failed: {e}")
+                    continue
+
+        transcript_text    = reconstruct_spelled_out(transcript_text)
+        stamped_transcript = reconstruct_spelled_out(stamped_transcript)
+        phone_msg = f" · 📞 {phone_number}" if phone_number else ""
+        st.success(
+            f"✅ Transcribed — {len(transcript_text.split())} words · "
+            f"{len(utterances) if utterances else '?'} segments{phone_msg}"
         )
 
-        with container:
-            # ── Extract phone from filename ────────────────────────────────────
-            phone_number = extract_phone_from_filename(audio_file.name)
+        # ── Score + parallel email extraction ─────────────────────────────────
+        MAX_CHARS   = 24_000
+        needs_email = _looks_like_spelled_email(transcript_text)
+        score_input = (
+            chunk_transcript(transcript_text)
+            if len(transcript_text) > MAX_CHARS
+            else transcript_text
+        )
 
-            # ── Transcribe ────────────────────────────────────────────────────
-            audio_hash = hash_audio_file(audio_file)
-            cache_key  = f"transcript_{audio_hash}"
-
-            if cache_key in st.session_state:
-                transcript_text, utterances, stamped_transcript = st.session_state[cache_key]
-                st.info("Using cached transcript.")
-            else:
-                with st.spinner("🎙️ Transcribing with Groq Whisper…"):
-                    try:
-                        transcript_text, utterances, stamped_transcript = transcribe_audio(
-                            client_groq, audio_file
-                        )
-                        st.session_state[cache_key] = (
-                            transcript_text, utterances, stamped_transcript
-                        )
-                    except Exception as e:
-                        st.error(f"Transcription failed: {e}")
-                        continue
-
-            transcript_text    = reconstruct_spelled_out(transcript_text)
-            stamped_transcript = reconstruct_spelled_out(stamped_transcript)
-            phone_msg = f" · 📞 {phone_number}" if phone_number else ""
-            st.success(
-                f"✅ Transcribed — {len(transcript_text.split())} words · "
-                f"{len(utterances) if utterances else '?'} segments{phone_msg}"
-            )
-
-            # ── Score + parallel email extraction ──────────────────────────────
-            MAX_CHARS = 24_000
-            needs_email = _looks_like_spelled_email(transcript_text)
-
-            def _run_score(chunks_or_text):
-                if isinstance(chunks_or_text, list):
-                    results = []
-                    for i, chunk in enumerate(chunks_or_text):
-                        prompt = build_scoring_prompt(
-                            client_name, criteria, agent_name, call_date,
-                            chunk, template, UNIVERSAL_RULES,
-                            stamped_transcript=(stamped_transcript if i == 0 else ""),
-                            phone_number=phone_number,
-                        )
-                        results.append(score_transcript(openai_client, prompt))
-                    return merge_scoring_results(results)
-                else:
+        def _run_score(chunks_or_text, _criteria=criteria, _client_name=client_name,
+                       _agent=agent_name, _date=call_date, _template=template,
+                       _stamped=stamped_transcript, _phone=phone_number,
+                       _oa=openai_client):
+            if isinstance(chunks_or_text, list):
+                results = []
+                for i, chunk in enumerate(chunks_or_text):
                     prompt = build_scoring_prompt(
-                        client_name, criteria, agent_name, call_date,
-                        chunks_or_text, template, UNIVERSAL_RULES,
-                        stamped_transcript=stamped_transcript,
-                        phone_number=phone_number,
+                        _client_name, _criteria, _agent, _date,
+                        chunk, _template, UNIVERSAL_RULES,
+                        stamped_transcript=(_stamped if i == 0 else ""),
+                        phone_number=_phone,
                     )
-                    return score_transcript(openai_client, prompt)
+                    results.append(score_transcript(_oa, prompt))
+                return merge_scoring_results(results)
+            else:
+                prompt = build_scoring_prompt(
+                    _client_name, _criteria, _agent, _date,
+                    chunks_or_text, _template, UNIVERSAL_RULES,
+                    stamped_transcript=_stamped,
+                    phone_number=_phone,
+                )
+                return score_transcript(_oa, prompt)
 
-            score_input = (
-                chunk_transcript(transcript_text)
-                if len(transcript_text) > MAX_CHARS
-                else transcript_text
-            )
+        verified_email = None
+        with st.spinner("🧠 Analyzing call (GPT-4.1-mini)…"):
+            if needs_email:
+                result_holder = [None]
+                email_holder  = [None]
+                err_holder    = [None]
 
-            verified_email = None
-
-            with st.spinner("🧠 Analyzing call (GPT-4.1-mini)…"):
-                if needs_email:
-                    result_holder = [None]
-                    email_holder  = [None]
-                    err_holder    = [None]
-
-                    def _t_score():
-                        try:
-                            result_holder[0] = _run_score(score_input)
-                        except Exception as e:
-                            err_holder[0] = str(e)
-
-                    def _t_email():
-                        email_holder[0] = extract_email(openai_client, transcript_text)
-
-                    t1 = threading.Thread(target=_t_score)
-                    t2 = threading.Thread(target=_t_email)
-                    t1.start(); t2.start()
-                    t1.join();  t2.join()
-
-                    if err_holder[0]:
-                        st.error(f"Analysis failed: {err_holder[0]}")
-                        continue
-                    result         = result_holder[0]
-                    verified_email = email_holder[0]
-                else:
+                def _t_score(_si=score_input):
                     try:
-                        result = _run_score(score_input)
+                        result_holder[0] = _run_score(_si)
                     except Exception as e:
-                        st.error(f"Analysis failed: {e}")
-                        continue
+                        err_holder[0] = str(e)
 
-            if result.get("parse_error"):
-                st.warning("Could not parse the AI response as JSON.")
-                with st.expander("Raw AI response"):
-                    st.code(result.get("raw", ""))
-                continue
+                def _t_email(_tr=transcript_text, _oa=openai_client):
+                    email_holder[0] = extract_email(_oa, _tr)
 
-            # ── Post-process template ──────────────────────────────────────────
-            template_filled = result.get("lead_template_filled", "")
+                t1 = threading.Thread(target=_t_score)
+                t2 = threading.Thread(target=_t_email)
+                t1.start(); t2.start()
+                t1.join();  t2.join()
 
-            # Inject dedicated email if extracted
-            if verified_email:
-                template_filled = _inject_email(template_filled, verified_email)
+                if err_holder[0]:
+                    st.error(f"Analysis failed: {err_holder[0]}")
+                    continue
+                result         = result_holder[0]
+                verified_email = email_holder[0]
+            else:
+                try:
+                    result = _run_score(score_input)
+                except Exception as e:
+                    st.error(f"Analysis failed: {e}")
+                    continue
 
-            # Strip any stray "Preliminary — recalc after MV" leftovers
-            prelim_temp = result.get("preliminary_temp")
-            template_filled = _scrub_preliminary_text(template_filled, prelim_temp)
-            template_filled = reconstruct_spelled_out(template_filled)
-            result["lead_template_filled"] = template_filled
+        if result.get("parse_error"):
+            st.warning("Could not parse the AI response as JSON.")
+            with st.expander("Raw AI response"):
+                st.code(result.get("raw", ""))
+            continue
 
-            # ── Audit log + session history ────────────────────────────────────
-            try:
-                append_audit_log({
-                    "agent": agent_name, "client": client_name,
-                    "call_date": str(call_date),
-                    "score": result.get("overall_score"),
-                    "qualified": result.get("qualified"),
-                    "disposition": result.get("disposition_suggested"),
-                    "red_flags_count": len(result.get("red_flags_found", [])),
-                    "audio_filename": audio_file.name,
-                })
-            except Exception:
-                pass
+        # ── Post-process template ──────────────────────────────────────────────
+        template_filled = result.get("lead_template_filled", "")
+        if verified_email:
+            template_filled = _inject_email(template_filled, verified_email)
+        prelim_temp = result.get("preliminary_temp")
+        template_filled = _scrub_preliminary_text(template_filled, prelim_temp)
+        template_filled = reconstruct_spelled_out(template_filled)
+        result["lead_template_filled"] = template_filled
 
-            st.session_state.analysis_history.append({
+        # ── Audit log ─────────────────────────────────────────────────────────
+        try:
+            append_audit_log({
                 "agent": agent_name, "client": client_name,
                 "call_date": str(call_date),
-                "score": result.get("overall_score", 0),
-                "disposition": result.get("disposition_suggested", "—"),
-                "qualified": result.get("qualified", False),
-                "summary": result.get("summary", ""),
-                "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+                "score": result.get("overall_score"),
+                "qualified": result.get("qualified"),
+                "disposition": result.get("disposition_suggested"),
+                "red_flags_count": len(result.get("red_flags_found", [])),
+                "audio_filename": audio_file.name,
             })
+        except Exception:
+            pass
 
-            # Store full result indexed by audio_hash for MV recalculation
-            st.session_state.results_store[audio_hash] = {
-                "result": result,
-                "template_filled": template_filled,
-                "stamped_transcript": stamped_transcript,
-                "is_re": criteria.get("type") == "real_estate",
-            }
+        st.session_state.analysis_history.append({
+            "agent": agent_name, "client": client_name,
+            "call_date": str(call_date),
+            "score": result.get("overall_score", 0),
+            "disposition": result.get("disposition_suggested", "—"),
+            "qualified": result.get("qualified", False),
+            "summary": result.get("summary", ""),
+            "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+        })
 
-            # ── Summary metrics ────────────────────────────────────────────────
+        # Store everything needed for display in session_state
+        st.session_state.analysis_results.append({
+            "file_name":          audio_file.name,
+            "audio_hash":         audio_hash,
+            "file_idx":           file_idx,
+            "agent_name":         agent_name,
+            "client_name":        client_name,
+            "call_date":          str(call_date),
+            "safe_agent":         safe_agent,
+            "is_re":              is_re,
+            "phone_number":       phone_number,
+            "result":             result,
+            "template_filled":    template_filled,
+            "stamped_transcript": stamped_transcript,
+            "transcript_text":    transcript_text,
+            "criteria":           criteria,
+        })
+
+
+# ─── Display results (always — survives reruns from MV input / buttons) ────────
+def _temp_css(temp: str) -> str:
+    return {
+        "hot":       "temp-hot",
+        "warm":      "temp-warm",
+        "cold":      "temp-cold",
+        "nurture":   "temp-nurture",
+        "throwaway": "temp-cold",
+    }.get((temp or "").lower(), "temp-unknown")
+
+
+def _parse_mv(raw: str) -> float | None:
+    clean = raw.strip().replace(",", "").replace("$", "").lower()
+    if clean in ("", "n/a", "na", "none", "n.a."):
+        return None
+    try:
+        return float(clean)
+    except ValueError:
+        return None
+
+
+for stored in st.session_state.analysis_results:
+    result         = stored["result"]
+    audio_hash     = stored["audio_hash"]
+    file_idx       = stored["file_idx"]
+    agent_name_s   = stored["agent_name"]
+    client_name_s  = stored["client_name"]
+    call_date_s    = stored["call_date"]
+    safe_agent_s   = stored["safe_agent"]
+    is_re          = stored["is_re"]
+    criteria_s     = stored["criteria"]
+    stamped_tr     = stored["stamped_transcript"]
+
+    # Read live template (may have been updated by MV recalculation)
+    template_filled = stored["template_filled"]
+
+    st.markdown("---")
+    st.markdown(f"## 📊 Results — {stored['file_name']}")
+
+    score  = result.get("overall_score", 0)
+    flags  = result.get("red_flags_found", [])
+    disq   = result.get("disqualifier_triggered")
+    qualif = result.get("qualified", False)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Score",       f"{score}/100")
+    m2.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
+    m3.metric("Disposition", result.get("disposition_suggested", "—"))
+    m4.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
+    st.progress(score / 100)
+
+    if disq:
+        st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
+    st.info(result.get("summary", ""))
+
+    tab_labels = ["📋 Lead Template", "🌡️ Temperature", "✅ Checklist",
+                  "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript"]
+    tab1, tab_temp, tab2, tab3, tab4, tab5 = st.tabs(tab_labels)
+
+    # ── Lead Template tab ──────────────────────────────────────────────────────
+    with tab1:
+        st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="lead-template">{template_filled}</div>', unsafe_allow_html=True)
+        st.download_button(
+            "⬇️ Copy Lead Template (.txt)", data=template_filled,
+            file_name=f"lead_{safe_agent_s}_{call_date_s}.txt",
+            mime="text/plain", key=f"dl_lead_{audio_hash}",
+        )
+
+    # ── Temperature tab ────────────────────────────────────────────────────────
+    with tab_temp:
+        if not is_re:
+            st.info("Temperature determination is for real estate clients only.")
+        else:
+            prelim_temp  = result.get("preliminary_temp") or "—"
+            is_prelim    = result.get("temp_is_preliminary", False)
+            call_data    = result.get("call_data") or {}
+
+            # Show current temp (may have been recalculated)
+            current_temp_key = f"current_temp_{audio_hash}"
+            current_temp = st.session_state.get(current_temp_key, prelim_temp)
+
+            prelim_note = " ⚠️ <small style='color:#888'>(MV not yet factored in — enter below to refine)</small>" if is_prelim else ""
+            st.markdown(
+                f'<div class="{_temp_css(current_temp)}">{current_temp.upper()}</div>{prelim_note}',
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+
+            # Call signals
+            ap       = call_data.get("ap")
+            timeline = call_data.get("timeline_months")
+            motive   = call_data.get("has_valid_motive", False)
+            listing  = call_data.get("open_to_listing", False)
+
+            st.markdown("**Call signals extracted by AI:**")
+            sig1, sig2 = st.columns(2)
+            sig1.markdown(
+                f"- **Asking Price:** {'${:,.0f}'.format(ap) if ap else 'Not captured'}\n"
+                f"- **Timeline:** {f'{int(timeline)} months' if timeline else 'Not captured'}"
+            )
+            sig2.markdown(
+                f"- **Valid Motive:** {'✅ Yes' if motive else '❌ No'}\n"
+                f"- **Open to Listing:** {'✅ Yes' if listing else '❌ No'}"
+            )
+
+            # MV entry
             st.markdown("---")
-            st.markdown("## 📊 Results")
-            score  = result.get("overall_score", 0)
-            flags  = result.get("red_flags_found", [])
-            disq   = result.get("disqualifier_triggered")
-            qualif = result.get("qualified", False)
+            st.markdown("**Enter Market Value (MV) to recalculate temperature:**")
+            mv_key = f"mv_{audio_hash}"
+            mv_input = st.text_input(
+                "Market Value",
+                placeholder="e.g. $280,000  or  N/A",
+                key=mv_key,
+                label_visibility="collapsed",
+            )
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Score",       f"{score}/100")
-            m2.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
-            m3.metric("Disposition", result.get("disposition_suggested", "—"))
-            m4.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
-            st.progress(score / 100)
-
-            if disq:
-                st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
-            st.info(result.get("summary", ""))
-
-            # ── Tabs ───────────────────────────────────────────────────────────
-            is_re = criteria.get("type") == "real_estate"
-            tab_labels = ["📋 Lead Template", "🌡️ Temperature", "✅ Checklist",
-                          "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript"]
-            tab1, tab_temp, tab2, tab3, tab4, tab5 = st.tabs(tab_labels)
-
-            with tab1:
-                st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
-                filled = result.get("lead_template_filled", "Not available")
-                st.markdown(f'<div class="lead-template">{filled}</div>', unsafe_allow_html=True)
-                st.download_button(
-                    "⬇️ Copy Lead Template (.txt)", data=filled,
-                    file_name=f"lead_{safe_agent}_{call_date}.txt",
-                    mime="text/plain", key=f"dl_lead_{file_idx}",
-                )
-
-            # ── Temperature tab ──────────────────────────────────────────────
-            with tab_temp:
-                if not is_re:
-                    st.info("Temperature determination is for real estate clients only.")
+            if st.button("🔄 Recalculate Temperature", key=f"recalc_{audio_hash}"):
+                mv_raw = st.session_state.get(mv_key, "")
+                mv_val = _parse_mv(mv_raw)
+                if mv_raw.strip() and mv_raw.strip().lower() not in ("n/a", "na", "none", "n.a.") and mv_val is None:
+                    st.warning("Could not read that value — try: 280000 or N/A")
                 else:
-                    temp     = result.get("preliminary_temp") or "—"
-                    is_prelim = result.get("temp_is_preliminary", False)
-                    call_data = result.get("call_data", {})
+                    new_temp = recalculate_temp(call_data, mv_val)
+                    mv_label = f"${mv_val:,.0f}" if mv_val else "N/A"
 
-                    # Colour-coded badge
-                    temp_cls = {
-                        "hot": "temp-hot", "warm": "temp-warm", "cold": "temp-cold",
-                        "nurture": "temp-nurture", "throwaway": "temp-cold",
-                    }.get((temp or "").lower(), "temp-pending")
+                    # Persist recalculated temp
+                    st.session_state[current_temp_key] = new_temp
 
-                    prelim_note = " ⚠️ <small>(MV not yet factored in)</small>" if is_prelim else ""
+                    # Update template Temp line
+                    updated = re.sub(
+                        r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*.*$',
+                        rf'\1 {new_temp}',
+                        template_filled,
+                        flags=re.IGNORECASE | re.MULTILINE,
+                    )
+                    # Write back to session_state so Lead Template tab shows it too
+                    for r in st.session_state.analysis_results:
+                        if r["audio_hash"] == audio_hash:
+                            r["template_filled"] = updated
+                            break
+
                     st.markdown(
-                        f'<div class="{temp_cls}">{temp.upper()}</div>{prelim_note}',
+                        f"**Recalculated with MV = {mv_label}:**<br>"
+                        f'<div class="{_temp_css(new_temp)}">{new_temp.upper()}</div>',
                         unsafe_allow_html=True,
                     )
-                    st.markdown("")
-
-                    # Raw call signals
-                    ap       = call_data.get("ap")
-                    timeline = call_data.get("timeline_months")
-                    motive   = call_data.get("has_valid_motive", False)
-                    listing  = call_data.get("open_to_listing", False)
-
-                    st.markdown("**Call signals extracted by AI:**")
-                    sig_col1, sig_col2 = st.columns(2)
-                    sig_col1.markdown(
-                        f"- **Asking Price:** {'${:,.0f}'.format(ap) if ap else 'Not captured'}\n"
-                        f"- **Timeline:** {f'{timeline:.0f} months' if timeline else 'Not captured'}"
-                    )
-                    sig_col2.markdown(
-                        f"- **Valid Motive:** {'✅ Yes' if motive else '❌ No'}\n"
-                        f"- **Open to Listing:** {'✅ Yes' if listing else '❌ No'}"
+                    st.markdown("**Updated Lead Template:**")
+                    st.markdown(f'<div class="lead-template">{updated}</div>', unsafe_allow_html=True)
+                    st.download_button(
+                        "⬇️ Download Updated Template",
+                        data=updated,
+                        file_name=f"lead_{safe_agent_s}_{call_date_s}_updated.txt",
+                        mime="text/plain",
+                        key=f"dl_updated_{audio_hash}",
                     )
 
-                    # MV entry + recalculation
-                    st.markdown("---")
-                    st.markdown("**Enter Market Value (MV) to recalculate:**")
-                    mv_input = st.text_input(
-                        "Market Value",
-                        placeholder="$280,000  or  N/A",
-                        key=f"mv_{audio_hash}_{file_idx}",
-                        label_visibility="collapsed",
-                    )
-
-                    if st.button("🔄 Recalculate Temperature", key=f"recalc_{audio_hash}_{file_idx}"):
-                        mv_val = None
-                        mv_clean = mv_input.strip().replace(",", "").replace("$", "").lower()
-                        if mv_clean not in ("", "n/a", "na", "none", "n.a."):
-                            try:
-                                mv_val = float(mv_clean)
-                            except ValueError:
-                                st.warning("Could not parse MV — enter a number like 280000 or N/A.")
-                                mv_val = None
-
-                        new_temp = recalculate_temp(call_data, mv_val)
-                        mv_label = f"${mv_val:,.0f}" if mv_val else "N/A"
-
-                        new_cls = {
-                            "hot": "temp-hot", "warm": "temp-warm", "cold": "temp-cold",
-                            "nurture": "temp-nurture",
-                        }.get(new_temp.lower(), "temp-pending")
-
-                        st.markdown(
-                            f"**Recalculated with MV = {mv_label}:**<br>"
-                            f'<div class="{new_cls}">{new_temp.upper()}</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                        # Update the stored template with new temp
-                        stored = st.session_state.results_store.get(audio_hash, {})
-                        if stored:
-                            updated_template = re.sub(
-                                r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*.*$',
-                                rf'\1 {new_temp}',
-                                stored.get("template_filled", ""),
-                                flags=re.IGNORECASE | re.MULTILINE,
-                            )
-                            st.session_state.results_store[audio_hash]["template_filled"] = updated_template
-                            st.markdown("**Updated Lead Template:**")
-                            st.markdown(
-                                f'<div class="lead-template">{updated_template}</div>',
-                                unsafe_allow_html=True,
-                            )
-                            st.download_button(
-                                "⬇️ Download Updated Template",
-                                data=updated_template,
-                                file_name=f"lead_{safe_agent}_{call_date}_updated.txt",
-                                mime="text/plain",
-                                key=f"dl_updated_{audio_hash}_{file_idx}",
-                            )
-
-            with tab2:
-                st.markdown(
-                    f'<div class="sec-hdr">Client Checklist — {criteria["framework"]}</div>',
-                    unsafe_allow_html=True,
-                )
-                for item in result.get("checklist_results", []):
-                    r = item["result"]
-                    badge_cls = {
-                        "YES": "badge-yes", "NO": "badge-no",
-                        "PARTIAL": "badge-part", "N/A": "badge-na",
-                    }.get(r.upper() if r else "", "badge-na")
-                    icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(
-                        r.upper() if r else "", "➖"
-                    )
-                    st.markdown(f"""
+    # ── Checklist tab ──────────────────────────────────────────────────────────
+    with tab2:
+        st.markdown(
+            f'<div class="sec-hdr">Client Checklist — {criteria_s["framework"]}</div>',
+            unsafe_allow_html=True,
+        )
+        for item in result.get("checklist_results", []):
+            r = (item.get("result") or "").upper()
+            badge_cls = {"YES": "badge-yes", "NO": "badge-no", "PARTIAL": "badge-part", "N/A": "badge-na"}.get(r, "badge-na")
+            icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
+            st.markdown(f"""
 <div class="chk-row">
   <span>{icon}</span>
   <span style="flex:1">{item['item']}<br>
@@ -513,95 +537,80 @@ if analyze_btn:
   <span class="badge {badge_cls}">{r}</span>
 </div>""", unsafe_allow_html=True)
 
-                if show_universal:
-                    st.markdown('<div class="sec-hdr">Universal Rules</div>', unsafe_allow_html=True)
-                    for item in result.get("universal_results", []):
-                        r = item["result"]
-                        icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(
-                            r.upper() if r else "", "➖"
-                        )
-                        st.markdown(
-                            f"{icon} **{item['item']}** — "
-                            f"<small style='color:#555'>{item.get('note','')}</small>",
-                            unsafe_allow_html=True,
-                        )
-
-            with tab3:
-                if flags:
-                    st.markdown('<div class="sec-hdr">🚩 Red Flags Found</div>', unsafe_allow_html=True)
-                    for f in flags:
-                        st.markdown(f'<div class="redflag">🚩 {f}</div>', unsafe_allow_html=True)
-                else:
-                    st.success("No red flags detected.")
-
-                st.markdown('<div class="sec-hdr">🎯 AI Coaching Notes</div>', unsafe_allow_html=True)
-                for note in result.get("coaching_notes", []):
-                    st.markdown(f'<div class="coaching">💡 {note}</div>', unsafe_allow_html=True)
-
+        if show_universal:
+            st.markdown('<div class="sec-hdr">Universal Rules</div>', unsafe_allow_html=True)
+            for item in result.get("universal_results", []):
+                r = (item.get("result") or "").upper()
+                icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
                 st.markdown(
-                    f'<div class="sec-hdr">📌 Standard Coaching — {client_name}</div>',
+                    f"{icon} **{item['item']}** — "
+                    f"<small style='color:#555'>{item.get('note','')}</small>",
                     unsafe_allow_html=True,
                 )
-                for point in criteria["coaching_focus"]:
-                    st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
 
-            with tab4:
-                for s in result.get("strengths", []):
-                    st.markdown(f"✅ {s}")
-                if not result.get("strengths"):
-                    st.info("No specific strengths identified.")
+    # ── Red Flags & Coaching tab ───────────────────────────────────────────────
+    with tab3:
+        if flags:
+            st.markdown('<div class="sec-hdr">🚩 Red Flags Found</div>', unsafe_allow_html=True)
+            for f in flags:
+                st.markdown(f'<div class="redflag">🚩 {f}</div>', unsafe_allow_html=True)
+        else:
+            st.success("No red flags detected.")
+        st.markdown('<div class="sec-hdr">🎯 AI Coaching Notes</div>', unsafe_allow_html=True)
+        for note in result.get("coaching_notes", []):
+            st.markdown(f'<div class="coaching">💡 {note}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="sec-hdr">📌 Standard Coaching — {client_name_s}</div>',
+            unsafe_allow_html=True,
+        )
+        for point in criteria_s["coaching_focus"]:
+            st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
 
-            with tab5:
-                if show_transcript:
-                    # Build speaker-labeled transcript if labels were returned
-                    raw_labels = result.get("speaker_labels") or []
-                    if raw_labels and isinstance(raw_labels, list):
-                        labeled = build_labeled_transcript(
-                            stamped_transcript, raw_labels, agent_name
-                        )
-                        st.markdown(
-                            '<div class="sec-hdr">Transcript — Speaker Labeled</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(f"→ = {agent_name} (Agent)   ◆ = Prospect")
-                        st.markdown(
-                            f'<div class="transcript">{labeled}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.download_button(
-                            "⬇️ Transcript (.txt)", data=labeled,
-                            file_name=f"transcript_{safe_agent}_{call_date}.txt",
-                            mime="text/plain", key=f"dl_transcript_{file_idx}",
-                        )
-                    else:
-                        st.markdown(
-                            '<div class="sec-hdr">Transcript with Timestamps</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f'<div class="transcript">{stamped_transcript}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.download_button(
-                            "⬇️ Transcript (.txt)", data=stamped_transcript,
-                            file_name=f"transcript_{safe_agent}_{call_date}.txt",
-                            mime="text/plain", key=f"dl_transcript_{file_idx}",
-                        )
-                else:
-                    st.info("Enable transcript in sidebar.")
+    # ── Strengths tab ─────────────────────────────────────────────────────────
+    with tab4:
+        for s in result.get("strengths", []):
+            st.markdown(f"✅ {s}")
+        if not result.get("strengths"):
+            st.info("No specific strengths identified.")
 
-            if export_json:
-                export_data = {
-                    "call_date": str(call_date), "agent": agent_name,
-                    "client": client_name,
-                    "transcript": transcript_text, "analysis": result,
-                }
+    # ── Transcript tab ────────────────────────────────────────────────────────
+    with tab5:
+        if show_transcript:
+            raw_labels = result.get("speaker_labels") or []
+            if raw_labels and isinstance(raw_labels, list):
+                labeled = build_labeled_transcript(stamped_tr, raw_labels, agent_name_s)
+                st.markdown('<div class="sec-hdr">Transcript — Speaker Labeled</div>', unsafe_allow_html=True)
+                st.caption(f"→ = {agent_name_s} (Agent)   ◆ = Prospect")
+                st.markdown(f'<div class="transcript">{labeled}</div>', unsafe_allow_html=True)
                 st.download_button(
-                    "⬇️ Full JSON Export",
-                    data=json.dumps(export_data, indent=2),
-                    file_name=f"analysis_{safe_agent}_{call_date}.json",
-                    mime="application/json", key=f"dl_json_{file_idx}",
+                    "⬇️ Transcript (.txt)", data=labeled,
+                    file_name=f"transcript_{safe_agent_s}_{call_date_s}.txt",
+                    mime="text/plain", key=f"dl_tr_{audio_hash}",
                 )
+            else:
+                st.markdown('<div class="sec-hdr">Transcript with Timestamps</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="transcript">{stamped_tr}</div>', unsafe_allow_html=True)
+                st.download_button(
+                    "⬇️ Transcript (.txt)", data=stamped_tr,
+                    file_name=f"transcript_{safe_agent_s}_{call_date_s}.txt",
+                    mime="text/plain", key=f"dl_tr_{audio_hash}",
+                )
+        else:
+            st.info("Enable transcript in sidebar.")
 
-    st.markdown("---")
-    st.caption("MyVA Call Analyzer · Groq Whisper + GPT-4.1-mini · Built for Salma @ MyVA")
+        if export_json:
+            export_data = {
+                "call_date": call_date_s, "agent": agent_name_s,
+                "client": client_name_s,
+                "transcript": stored["transcript_text"],
+                "analysis": result,
+            }
+            st.download_button(
+                "⬇️ Full JSON Export",
+                data=json.dumps(export_data, indent=2),
+                file_name=f"analysis_{safe_agent_s}_{call_date_s}.json",
+                mime="application/json", key=f"dl_json_{audio_hash}",
+            )
+
+st.markdown("---")
+st.caption("MyVA Call Analyzer · Groq Whisper + GPT-4.1-mini · Built for Salma @ MyVA")
