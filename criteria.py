@@ -448,15 +448,45 @@ Call Recording:""",
 }
 
 
+# ─── Temperature determination logic ────────────────────────────────────────
+# Injected into the scoring prompt so GPT always picks a concrete temperature.
+
+TEMP_LOGIC = """
+Determine lead temperature using these rules IN ORDER:
+
+1. If prospect has NO valid motive or reason to sell → COLD (regardless of anything else)
+2. If timeline is more than 1 year → NURTURE
+3. If timeline is around 1 year → COLD
+4. If timeline is ASAP to 3 months (soon):
+   a. If AP < MV (or MV unknown but seller highly motivated) AND valid motive → HOT
+   b. If AP > MV AND valid motive AND open to listing → WARM
+   c. If AP > MV AND valid motive AND NOT open to listing → COLD
+
+When MV is UNKNOWN, ALWAYS still pick the best concrete temperature from available
+signals (motive strength, timeline, asking price reasonableness, seller attitude, open
+to listing). NEVER return null and NEVER write the phrase "Preliminary — recalculate
+after MV" into the template or anywhere else. The user will enter the MV afterward and
+the app will recalculate automatically if needed.
+
+Always add any information the prospect provided that does not fit an existing field into the Notes section.
+"""
+
+
 # ─── Whisper vocabulary prompt ───────────────────────────────────────────────
+# Balanced ~80-token set. Heavy email-shape primers bias Whisper to skip speech.
 
 WHISPER_VOCAB = (
-    "mortgage, equity, foreclosure, tax lien, sqft, square feet, "
-    "owner-occupied, Zillow, MLS, realtor, cash offer, escrow, HOA, "
-    "appraisal, earnest money, refinance, ARV, CapEx, multifamily, "
-    "duplex, triplex, EBITDA, ReSimpli, HubSpot, GHL, "
-    "Rejigg, Loftey, Barracuda, Integrity, Haven Senior, Biancardi, "
-    "Smithton, Boone, CIC Partners, Giancarlo, Shiraz"
+    # Domain terms — helps with rare words Whisper has seen less often
+    "Zillow, MLS, realtor, duplex, triplex, multifamily, Zestimate, "
+    "ARV, HOA, escrow, wholesale, "
+    # Client / company names so they come out right
+    "ReSimpli, HubSpot, Dealonomy, Haven Senior, Biancardi, Smithton, "
+    "Boone, CIC Partners, Giancarlo, Shiraz, Premier Site Solutions, "
+    "Sir Charles, Scott Fuller, Rejigg, Loftey, Barracuda, Integrity, "
+    # Phonetic alphabet — preserves spelled names/emails without biasing
+    "alpha, bravo, charlie, delta, echo, foxtrot, golf, hotel, india, "
+    "juliet, kilo, lima, mike, november, oscar, papa, quebec, romeo, "
+    "sierra, tango, uniform, victor, whiskey, yankee, zulu"
 )
 
 # Known Whisper hallucinations to filter out of transcripts
