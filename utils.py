@@ -16,6 +16,28 @@ from concurrent.futures import ThreadPoolExecutor
 from criteria import WHISPER_VOCAB, WHISPER_HALLUCINATIONS, TEMP_LOGIC
 
 
+# ─── Phone number extraction from filename ───────────────────────────────────
+
+def extract_phone_from_filename(filename: str) -> str | None:
+    """
+    Pull the prospect's phone number from the end of the audio filename.
+    Looks for the LAST run of 10 or 11 consecutive digits.
+    Examples:
+      '20260422_1725_4405727500.mp3'   → '(440) 572-7500'
+      '...-19728013866.wav'            → '+1 (972) 801-3866'
+    """
+    name = os.path.splitext(os.path.basename(filename))[0]
+    matches = re.findall(r'(?<!\d)(\d{10,11})(?!\d)', name)
+    if not matches:
+        return None
+    raw = matches[-1]
+    if len(raw) == 11 and raw.startswith("1"):
+        return f"+1 ({raw[1:4]}) {raw[4:7]}-{raw[7:]}"
+    if len(raw) == 10:
+        return f"({raw[0:3]}) {raw[3:6]}-{raw[6:]}"
+    return raw
+
+
 # ─── Filename sanitization ───────────────────────────────────────────────────
 
 def sanitize_filename(name: str) -> str:
@@ -348,7 +370,8 @@ def recalculate_temp(call_data: dict, mv: float | None) -> str:
 
 def build_scoring_prompt(client_name, criteria, agent_name, call_date,
                          transcript_text, template, universal_rules,
-                         stamped_transcript: str = ""):
+                         stamped_transcript: str = "",
+                         phone_number: str | None = None):
     checklist_str  = "\n".join(f"- {x}" for x in criteria["checklist"])
     universal_str  = "\n".join(f"- {x}" for x in universal_rules)
     redflags_str   = "\n".join(f"- {r}" for r in criteria["red_flags"])
@@ -359,6 +382,12 @@ def build_scoring_prompt(client_name, criteria, agent_name, call_date,
         "Market Value / MV / Zestimate field must NEVER be filled — leave it blank. "
         "The user will look it up on Zillow/Realtor.com manually.\n"
         if is_re else ""
+    )
+    phone_note = (
+        f"   - PROSPECT PHONE NUMBER = \"{phone_number}\" — extracted from the call recording "
+        f"filename. Use this EXACT value in any phone / number field.\n"
+        if phone_number else
+        "   - Phone number: leave blank if not explicitly mentioned in transcript.\n"
     )
     temp_section = f"""
 6. "preliminary_temp": one of Hot / Warm / Cold / Nurture / Throwaway (real estate only, else null).
@@ -417,7 +446,7 @@ Instructions for lead template:
 - If a field was not discussed, write "Not captured".
 - For the agent name/date line, use: {agent_name or '[Agent Name]'} / {call_date}
 - For Call Recording: leave as "[Paste link here]"
-- {mv_note}- For real estate clients: fill the Temp line with a single concrete word
+- {phone_note}- {mv_note}- For real estate clients: fill the Temp line with a single concrete word
   (Hot / Warm / Cold / Nurture / Throwaway). NEVER write "Preliminary", "recalculate
   after MV", "TBD", "unknown", or "pending" in the Temp line.
 - Preserve the exact template structure including all labels.
@@ -502,6 +531,7 @@ def score_transcript(openai_client, prompt: str) -> dict:
         model="gpt-4.1-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
+        max_tokens=3500,
         response_format={"type": "json_object"},
         timeout=90,
     )

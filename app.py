@@ -7,7 +7,7 @@ from groq import Groq
 from openai import OpenAI
 from criteria import CLIENT_CRITERIA, UNIVERSAL_RULES, LEAD_TEMPLATES
 from utils import (
-    sanitize_filename, hash_audio_file,
+    sanitize_filename, hash_audio_file, extract_phone_from_filename,
     transcribe_audio, build_scoring_prompt, score_transcript,
     chunk_transcript, merge_scoring_results,
     reconstruct_spelled_out, append_audit_log,
@@ -200,8 +200,9 @@ if analyze_btn:
     client_groq   = Groq(api_key=GROQ_API_KEY)
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     criteria      = CLIENT_CRITERIA[client_name]
-    template_key  = criteria.get("type", "real_estate")
-    template      = LEAD_TEMPLATES.get(template_key, LEAD_TEMPLATES["real_estate"])
+    # Use specific template_type first (e.g. "smithton", "jordyn"), fall back to type
+    template_key  = criteria.get("template_type", criteria.get("type", "real_estate"))
+    template      = LEAD_TEMPLATES.get(template_key, LEAD_TEMPLATES["listing"])
     safe_agent    = sanitize_filename(agent_name)
 
     for file_idx, audio_file in enumerate(audio_files):
@@ -211,6 +212,9 @@ if analyze_btn:
         )
 
         with container:
+            # ── Extract phone from filename ────────────────────────────────────
+            phone_number = extract_phone_from_filename(audio_file.name)
+
             # ── Transcribe ────────────────────────────────────────────────────
             audio_hash = hash_audio_file(audio_file)
             cache_key  = f"transcript_{audio_hash}"
@@ -233,9 +237,10 @@ if analyze_btn:
 
             transcript_text    = reconstruct_spelled_out(transcript_text)
             stamped_transcript = reconstruct_spelled_out(stamped_transcript)
+            phone_msg = f" · 📞 {phone_number}" if phone_number else ""
             st.success(
                 f"✅ Transcribed — {len(transcript_text.split())} words · "
-                f"{len(utterances) if utterances else '?'} segments"
+                f"{len(utterances) if utterances else '?'} segments{phone_msg}"
             )
 
             # ── Score + parallel email extraction ──────────────────────────────
@@ -250,6 +255,7 @@ if analyze_btn:
                             client_name, criteria, agent_name, call_date,
                             chunk, template, UNIVERSAL_RULES,
                             stamped_transcript=(stamped_transcript if i == 0 else ""),
+                            phone_number=phone_number,
                         )
                         results.append(score_transcript(openai_client, prompt))
                     return merge_scoring_results(results)
@@ -258,6 +264,7 @@ if analyze_btn:
                         client_name, criteria, agent_name, call_date,
                         chunks_or_text, template, UNIVERSAL_RULES,
                         stamped_transcript=stamped_transcript,
+                        phone_number=phone_number,
                     )
                     return score_transcript(openai_client, prompt)
 
