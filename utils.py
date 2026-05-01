@@ -333,38 +333,52 @@ def recalculate_temp(call_data: dict, mv: float | None) -> str:
       "ap": <float|null>,
       "has_valid_motive": <bool>,
       "timeline_months": <float|null>,
-      "open_to_listing": <bool>
+      "open_to_listing": <bool>,
+      "prospect_interest_level": <"High"|"Medium"|"Low">
     }
     """
     ap              = call_data.get("ap")
     has_motive      = bool(call_data.get("has_valid_motive", False))
     timeline        = call_data.get("timeline_months")
     open_to_listing = bool(call_data.get("open_to_listing", False))
+    interest        = (call_data.get("prospect_interest_level") or "Medium").strip().capitalize()
 
+    # ── Base temperature (existing logic) ─────────────────────────────────────
     if not has_motive:
-        return "Cold"
-
-    if timeline is not None:
-        if timeline > 12:
-            return "Nurture"
-        if timeline >= 10:
-            return "Cold"
-
-    # Short / ASAP timeline (≤ 3 months) or timeline unknown
-    if timeline is None or timeline <= 3:
+        base = "Cold"
+    elif timeline is not None and timeline > 12:
+        base = "Nurture"
+    elif timeline is not None and timeline >= 10:
+        base = "Cold"
+    elif timeline is None or timeline <= 3:
+        # Short / ASAP / unknown timeline
         if mv is None:
-            # No MV — pick based on motivation + attitude
-            return "Hot" if has_motive else "Warm"
-        if ap is not None:
+            base = "Hot" if has_motive else "Warm"
+        elif ap is not None:
             if ap < mv:
-                return "Hot"
-            if open_to_listing:
-                return "Warm"
-            return "Cold"
-        return "Warm"
+                base = "Hot"
+            elif open_to_listing:
+                base = "Warm"
+            else:
+                base = "Cold"
+        else:
+            base = "Warm"
+    else:
+        # Mid timeline 3–10 months
+        base = "Warm"
 
-    # Mid timeline (3–10 months)
-    return "Warm"
+    # ── Adjust one level for prospect interest ─────────────────────────────────
+    # Only apply to linear temps (Hot/Warm/Cold) — Nurture stays Nurture
+    LEVELS = ["Cold", "Warm", "Hot"]
+    if base in LEVELS:
+        idx = LEVELS.index(base)
+        if interest == "High":
+            idx = min(idx + 1, len(LEVELS) - 1)
+        elif interest == "Low":
+            idx = max(idx - 1, 0)
+        return LEVELS[idx]
+
+    return base  # Nurture / Throwaway unchanged
 
 
 # ─── Prompt construction ─────────────────────────────────────────────────────
@@ -402,7 +416,9 @@ def build_scoring_prompt(client_name, criteria, agent_name, call_date,
 
 7. "call_data": object used for recalculation when user supplies MV:
    {{ "ap": <asking price as number or null>, "has_valid_motive": <true|false>,
-      "timeline_months": <estimated months or null>, "open_to_listing": <true|false> }}
+      "timeline_months": <estimated months or null>, "open_to_listing": <true|false>,
+      "prospect_interest_level": "<High|Medium|Low>",
+      "prospect_interest_notes": "<1-sentence reason for this assessment>" }}
 """ if is_re else ""
 
     numbered_stamped = ""
@@ -488,7 +504,7 @@ Respond with this exact JSON:
   "speaker_labels": ["<A or P per numbered line in STAMPED TRANSCRIPT>"],
   "preliminary_temp": "<Hot|Warm|Cold|Nurture|Throwaway or null>",
   "temp_is_preliminary": <true|false>,
-  "call_data": {{"ap": <number or null>, "has_valid_motive": <true|false>, "timeline_months": <number or null>, "open_to_listing": <true|false>}}
+  "call_data": {{"ap": <number or null>, "has_valid_motive": <true|false>, "timeline_months": <number or null>, "open_to_listing": <true|false>, "prospect_interest_level": "<High|Medium|Low>", "prospect_interest_notes": "<1-sentence reason>"}}
 }}
 
 STAMPED TRANSCRIPT (numbered lines — use for "speaker_labels" field, one A or P per line):
@@ -532,7 +548,7 @@ def score_transcript(openai_client, prompt: str) -> dict:
         model="gpt-4.1-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        max_tokens=3500,
+        max_tokens=5000,
         response_format={"type": "json_object"},
         timeout=90,
     )

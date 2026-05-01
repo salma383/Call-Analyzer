@@ -416,12 +416,56 @@ for stored in st.session_state.analysis_results:
         st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
     st.info(result.get("summary", ""))
 
+    # Shared keys defined once, used across tabs
+    mv_key           = f"mv_{audio_hash}"
+    current_temp_key = f"current_temp_{audio_hash}"
+    call_data        = result.get("call_data") or {}
+    prelim_temp      = result.get("preliminary_temp") or "—"
+    current_temp     = st.session_state.get(current_temp_key, prelim_temp)
+
     tab_labels = ["📋 Lead Template", "🌡️ Temperature", "✅ Checklist",
                   "🚨 Red Flags & Coaching", "💪 Strengths", "📄 Transcript"]
     tab1, tab_temp, tab2, tab3, tab4, tab5 = st.tabs(tab_labels)
 
     # ── Lead Template tab ──────────────────────────────────────────────────────
     with tab1:
+        # MV input lives HERE so it's right next to the template it fills
+        if is_re:
+            st.markdown("**📊 Enter Market Value (MV) — updates Temp in template and Temperature tab**")
+            col_mv, col_btn = st.columns([3, 1])
+            with col_mv:
+                st.text_input(
+                    "MV",
+                    placeholder="e.g. $280,000  or  N/A",
+                    key=mv_key,
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                if st.button("🔄 Update", key=f"recalc_{audio_hash}", use_container_width=True):
+                    mv_raw = st.session_state.get(mv_key, "")
+                    mv_val = _parse_mv(mv_raw)
+                    if mv_raw.strip() and mv_raw.strip().lower() not in ("n/a", "na", "none", "n.a.") and mv_val is None:
+                        st.warning("Could not read that value — try: 280000 or N/A")
+                    else:
+                        new_temp = recalculate_temp(call_data, mv_val)
+                        st.session_state[current_temp_key] = new_temp
+
+                        # Update Temp line in template
+                        updated = re.sub(
+                            r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*.*$',
+                            rf'\1 {new_temp}',
+                            template_filled,
+                            flags=re.IGNORECASE | re.MULTILINE,
+                        )
+                        for r in st.session_state.analysis_results:
+                            if r["audio_hash"] == audio_hash:
+                                r["template_filled"] = updated
+                                break
+
+                        # Rerun so the temperature badge and template both refresh
+                        st.rerun()
+            st.markdown("")
+
         st.markdown('<div class="sec-hdr">Auto-filled Lead Template</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="lead-template">{template_filled}</div>', unsafe_allow_html=True)
         st.download_button(
@@ -435,22 +479,41 @@ for stored in st.session_state.analysis_results:
         if not is_re:
             st.info("Temperature determination is for real estate clients only.")
         else:
-            prelim_temp  = result.get("preliminary_temp") or "—"
-            is_prelim    = result.get("temp_is_preliminary", False)
-            call_data    = result.get("call_data") or {}
+            # Temperature badge — updates after MV recalculation via rerun
+            mv_entered = st.session_state.get(mv_key, "").strip()
+            if mv_entered and mv_entered.lower() not in ("n/a", "na", "none", "n.a."):
+                mv_note = ""
+            else:
+                mv_note = " <small style='color:#888'>⚠️ Enter MV in Lead Template tab to finalize</small>"
 
-            # Show current temp (may have been recalculated)
-            current_temp_key = f"current_temp_{audio_hash}"
-            current_temp = st.session_state.get(current_temp_key, prelim_temp)
-
-            prelim_note = " ⚠️ <small style='color:#888'>(MV not yet factored in — enter below to refine)</small>" if is_prelim else ""
             st.markdown(
-                f'<div class="{_temp_css(current_temp)}">{current_temp.upper()}</div>{prelim_note}',
+                f'<div class="{_temp_css(current_temp)}">{current_temp.upper()}</div>{mv_note}',
                 unsafe_allow_html=True,
             )
             st.markdown("")
 
-            # Call signals
+            # ── Tonality / Prospect Interest ───────────────────────────────────
+            interest       = call_data.get("prospect_interest_level") or "—"
+            interest_notes = call_data.get("prospect_interest_notes") or ""
+
+            interest_colors = {
+                "High":   ("#e8f5e9", "#2e7d32"),
+                "Medium": ("#fff3e0", "#e65100"),
+                "Low":    ("#ffebee", "#c62828"),
+            }
+            bg, fg = interest_colors.get(interest, ("#f5f5f5", "#555"))
+
+            st.markdown("**🎭 Prospect Tonality / Interest Level:**")
+            st.markdown(
+                f'<span style="background:{bg};color:{fg};padding:0.3rem 0.9rem;'
+                f'border-radius:6px;font-weight:700;font-size:1rem;">{interest}</span>',
+                unsafe_allow_html=True,
+            )
+            if interest_notes:
+                st.caption(interest_notes)
+
+            # ── Call signals ───────────────────────────────────────────────────
+            st.markdown("---")
             ap       = call_data.get("ap")
             timeline = call_data.get("timeline_months")
             motive   = call_data.get("has_valid_motive", False)
@@ -466,45 +529,6 @@ for stored in st.session_state.analysis_results:
                 f"- **Valid Motive:** {'✅ Yes' if motive else '❌ No'}\n"
                 f"- **Open to Listing:** {'✅ Yes' if listing else '❌ No'}"
             )
-
-            # MV entry
-            st.markdown("---")
-            st.markdown("**Enter Market Value (MV) to recalculate temperature:**")
-            mv_key = f"mv_{audio_hash}"
-            mv_input = st.text_input(
-                "Market Value",
-                placeholder="e.g. $280,000  or  N/A",
-                key=mv_key,
-                label_visibility="collapsed",
-            )
-
-            if st.button("🔄 Recalculate Temperature", key=f"recalc_{audio_hash}"):
-                mv_raw = st.session_state.get(mv_key, "")
-                mv_val = _parse_mv(mv_raw)
-                if mv_raw.strip() and mv_raw.strip().lower() not in ("n/a", "na", "none", "n.a.") and mv_val is None:
-                    st.warning("Could not read that value — try: 280000 or N/A")
-                else:
-                    new_temp = recalculate_temp(call_data, mv_val)
-
-                    # Persist recalculated temp so top display picks it up on rerun
-                    st.session_state[current_temp_key] = new_temp
-
-                    # Update template Temp line
-                    updated = re.sub(
-                        r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*.*$',
-                        rf'\1 {new_temp}',
-                        template_filled,
-                        flags=re.IGNORECASE | re.MULTILINE,
-                    )
-                    # Write back so Lead Template tab shows it too
-                    for r in st.session_state.analysis_results:
-                        if r["audio_hash"] == audio_hash:
-                            r["template_filled"] = updated
-                            break
-
-                    # Force a rerun so the temperature badge at the top of this tab
-                    # re-reads session_state and immediately reflects the new value
-                    st.rerun()
 
     # ── Checklist tab ──────────────────────────────────────────────────────────
     with tab2:

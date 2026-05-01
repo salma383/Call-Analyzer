@@ -417,19 +417,28 @@ Call Recording: [Paste link here]""",
     "giancarlo": """(Agent name and date)
 Temp:
 
-Contact Info:
+• Contact Info:
   Name:
   Number:
   Email:
   Address:
+  Call back on:
 
-Notes:
+• Condition:
+  Bedrooms:
+  Bathrooms:
+  Sqft:
 
-Timeline:
-Listing:
-Reason:
+• Motivation/Pain and Others:
+  Notes:
+  Residency:
+  Timeline:
+  Reason:
+  AP:
+  Zestimate:
+  Listing:
 
-Call Recording: [Paste link here]""",
+• Call Recording: [Paste link here]""",
 
     "scott": """(Agent name and date)
 Temperature:
@@ -460,13 +469,29 @@ Determine lead temperature using these rules IN ORDER:
    b. If AP > MV AND valid motive AND open to listing → WARM
    c. If AP > MV AND valid motive AND NOT open to listing → COLD
 
-When MV is UNKNOWN, ALWAYS still pick the best concrete temperature from available
-signals (motive strength, timeline, asking price reasonableness, seller attitude, open
-to listing). NEVER return null and NEVER write the phrase "Preliminary — recalculate
-after MV" into the template or anywhere else. The user will enter the MV afterward and
-the app will recalculate automatically if needed.
+5. PROSPECT INTEREST LEVEL — always assess tone and engagement:
+   - "High": prospect engaged actively, asked questions, volunteered details, sounded genuinely
+     motivated. They clearly want to sell and are taking the call seriously.
+   - "Medium": open to the idea but no strong urgency. Politely engaged, answered questions
+     without pushing back, but didn't show excitement.
+   - "Low": clearly not interested. Short dismissive answers, repeated objections, told the
+     agent to remove them, or was rude/hung up quickly.
 
-Always add any information the prospect provided that does not fit an existing field into the Notes section.
+   Store this as "prospect_interest_level" in call_data. Add a 1-sentence reason
+   as "prospect_interest_notes" in call_data.
+
+   Interest level adjusts the base temperature by ONE level:
+   - High → upgrade one level: Cold→Warm (if motive), Warm→Hot
+   - Low  → downgrade one level: Hot→Warm, Warm→Cold
+   - Medium → no adjustment
+
+When MV is UNKNOWN, ALWAYS still pick the best concrete temperature from available
+signals (motive strength, timeline, asking price, prospect interest, open to listing).
+NEVER return null and NEVER write "Preliminary", "recalculate after MV", or "TBD"
+in the template. The user will enter the MV afterward and the app recalculates automatically.
+
+Always add any information the prospect provided that does not fit an existing field
+into the Notes section.
 """
 
 
