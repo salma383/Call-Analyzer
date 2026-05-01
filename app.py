@@ -485,9 +485,8 @@ for stored in st.session_state.analysis_results:
                     st.warning("Could not read that value — try: 280000 or N/A")
                 else:
                     new_temp = recalculate_temp(call_data, mv_val)
-                    mv_label = f"${mv_val:,.0f}" if mv_val else "N/A"
 
-                    # Persist recalculated temp
+                    # Persist recalculated temp so top display picks it up on rerun
                     st.session_state[current_temp_key] = new_temp
 
                     # Update template Temp line
@@ -497,26 +496,15 @@ for stored in st.session_state.analysis_results:
                         template_filled,
                         flags=re.IGNORECASE | re.MULTILINE,
                     )
-                    # Write back to session_state so Lead Template tab shows it too
+                    # Write back so Lead Template tab shows it too
                     for r in st.session_state.analysis_results:
                         if r["audio_hash"] == audio_hash:
                             r["template_filled"] = updated
                             break
 
-                    st.markdown(
-                        f"**Recalculated with MV = {mv_label}:**<br>"
-                        f'<div class="{_temp_css(new_temp)}">{new_temp.upper()}</div>',
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown("**Updated Lead Template:**")
-                    st.markdown(f'<div class="lead-template">{updated}</div>', unsafe_allow_html=True)
-                    st.download_button(
-                        "⬇️ Download Updated Template",
-                        data=updated,
-                        file_name=f"lead_{safe_agent_s}_{call_date_s}_updated.txt",
-                        mime="text/plain",
-                        key=f"dl_updated_{audio_hash}",
-                    )
+                    # Force a rerun so the temperature badge at the top of this tab
+                    # re-reads session_state and immediately reflects the new value
+                    st.rerun()
 
     # ── Checklist tab ──────────────────────────────────────────────────────────
     with tab2:

@@ -76,40 +76,6 @@ CLIENT_CRITERIA = {
         "script_notes": "Must sound like a private introduction, not a pitch.",
     },
 
-    "Tristen / Loftey (RE Sellers)": {
-        "type": "real_estate",
-        "template_type": "listing",
-        "dialer": "Enzo",
-        "agent": "Joy",
-        "framework": "Motivation · Timeline · Email",
-        "checklist": [
-            "Did agent say 'home' (NOT 'house' or 'property')?",
-            "Did agent ask if prospect is considering selling?",
-            "Did agent get the timeline (within 2 years)?",
-            "Did agent get the motivation (why selling)?",
-            "Did agent ask for email?",
-            "Did agent schedule a callback?",
-            "Did agent avoid revealing 'Loftey Group' name before qualification?",
-        ],
-        "hard_disqualifiers": [
-            "No timeline + no email = not a lead",
-            "Confirmed not selling within 24 months and no email given",
-        ],
-        "red_flags": [
-            "Agent said 'house' or 'property' instead of 'home'",
-            "Agent revealed 'Loftey Group' before prospect qualified",
-            "Agent skipped asking for email",
-            "Agent didn't ask about motivation",
-        ],
-        "coaching_focus": [
-            "ALWAYS say 'home' — this is Tristen's hard rule, no exceptions",
-            "Email is required even for cold leads — always ask",
-            "Motivation is key: retiring, downsizing, divorce, kids graduating, etc.",
-            "Lock in specific callback time — not 'call anytime'",
-        ],
-        "script_notes": "Cold/email leads still count if email is captured. Conversion target: 1.5%.",
-    },
-
     "Smithton / Boone (RE Cash Buyer)": {
         "type": "real_estate",
         "template_type": "smithton",
