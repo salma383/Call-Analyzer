@@ -407,9 +407,12 @@ for stored in st.session_state.analysis_results:
     except (TypeError, ValueError):
         score = 0
 
-    flags  = result.get("red_flags_found", [])
-    disq   = result.get("disqualifier_triggered")
-    qualif = result.get("qualified", False)
+    # Use `or []` / `or ""` so null JSON values don't crash len() / iteration
+    flags      = result.get("red_flags_found") or []
+    disq       = result.get("disqualifier_triggered")
+    qualif     = result.get("qualified", False)
+    chk_list   = result.get("checklist_results") or []
+    chk_yes    = sum(1 for x in chk_list if (x.get("result") or "").upper() == "YES")
 
     # Score banner — always visible, never blank
     score_color = "#2e7d32" if score >= 70 else "#e65100" if score >= 45 else "#c62828"
@@ -423,13 +426,13 @@ for stored in st.session_state.analysis_results:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
-    m2.metric("Disposition", result.get("disposition_suggested", "—"))
+    m2.metric("Disposition", result.get("disposition_suggested") or "—")
     m3.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
-    m4.metric("Checklist",   f"{sum(1 for x in result.get('checklist_results',[]) if (x.get('result') or '').upper()=='YES')}/{len(result.get('checklist_results',[]))}")
+    m4.metric("Checklist",   f"{chk_yes}/{len(chk_list)}")
 
     if disq:
         st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
-    st.info(result.get("summary", ""))
+    st.info(result.get("summary") or "")
 
     # Shared keys defined once, used across tabs
     mv_key           = f"mv_{audio_hash}"
@@ -568,14 +571,14 @@ for stored in st.session_state.analysis_results:
             f'<div class="sec-hdr">Client Checklist — {criteria_s["framework"]}</div>',
             unsafe_allow_html=True,
         )
-        for item in result.get("checklist_results", []):
+        for item in (result.get("checklist_results") or []):
             r = (item.get("result") or "").upper()
             badge_cls = {"YES": "badge-yes", "NO": "badge-no", "PARTIAL": "badge-part", "N/A": "badge-na"}.get(r, "badge-na")
             icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
             st.markdown(f"""
 <div class="chk-row">
   <span>{icon}</span>
-  <span style="flex:1">{item['item']}<br>
+  <span style="flex:1">{item.get('item','')}<br>
     <small style="color:#666">{item.get('note','')}</small>
   </span>
   <span class="badge {badge_cls}">{r}</span>
@@ -583,11 +586,11 @@ for stored in st.session_state.analysis_results:
 
         if show_universal:
             st.markdown('<div class="sec-hdr">Universal Rules</div>', unsafe_allow_html=True)
-            for item in result.get("universal_results", []):
+            for item in (result.get("universal_results") or []):
                 r = (item.get("result") or "").upper()
                 icon = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "N/A": "➖"}.get(r, "➖")
                 st.markdown(
-                    f"{icon} **{item['item']}** — "
+                    f"{icon} **{item.get('item','')}** — "
                     f"<small style='color:#555'>{item.get('note','')}</small>",
                     unsafe_allow_html=True,
                 )
@@ -601,20 +604,21 @@ for stored in st.session_state.analysis_results:
         else:
             st.success("No red flags detected.")
         st.markdown('<div class="sec-hdr">🎯 AI Coaching Notes</div>', unsafe_allow_html=True)
-        for note in result.get("coaching_notes", []):
+        for note in (result.get("coaching_notes") or []):
             st.markdown(f'<div class="coaching">💡 {note}</div>', unsafe_allow_html=True)
         st.markdown(
             f'<div class="sec-hdr">📌 Standard Coaching — {client_name_s}</div>',
             unsafe_allow_html=True,
         )
-        for point in criteria_s["coaching_focus"]:
+        for point in (criteria_s.get("coaching_focus") or []):
             st.markdown(f'<div class="coaching">📌 {point}</div>', unsafe_allow_html=True)
 
     # ── Strengths tab ─────────────────────────────────────────────────────────
     with tab4:
-        for s in result.get("strengths", []):
+        strengths = result.get("strengths") or []
+        for s in strengths:
             st.markdown(f"✅ {s}")
-        if not result.get("strengths"):
+        if not strengths:
             st.info("No specific strengths identified.")
 
     # ── Transcript tab ────────────────────────────────────────────────────────
