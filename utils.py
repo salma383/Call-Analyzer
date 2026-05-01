@@ -467,6 +467,13 @@ Instructions for lead template:
   (Hot / Warm / Cold / Nurture / Throwaway). NEVER write "Preliminary", "recalculate
   after MV", "TBD", "unknown", or "pending" in the Temp line.
 - Preserve the exact template structure including all labels.
+- REASON field: Always fill with the prospect's stated reason, situation, or objection —
+  even if negative. If they said they're not selling, write WHY (e.g., "Considering renting
+  out instead", "Not ready yet, wants to wait", "Not interested at this time"). Only write
+  "Not captured" if the prospect said absolutely nothing about their reason/intent.
+- ZESTIMATE field: Leave blank — the user will fill it from Zillow. Do NOT write "Not captured".
+- AP (Asking Price): Write the number if the prospect mentioned a price. If not mentioned,
+  write "Not captured". Do NOT guess or infer a price.
 
 EMAIL EXTRACTION — follow every rule:
 - "X as in Word" or "X for Word" → only the letter X, discard the reference word.

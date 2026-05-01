@@ -400,17 +400,32 @@ for stored in st.session_state.analysis_results:
     st.markdown("---")
     st.markdown(f"## 📊 Results — {stored['file_name']}")
 
-    score  = result.get("overall_score", 0)
+    # Type-safe score — GPT sometimes returns null or a string
+    _raw_score = result.get("overall_score")
+    try:
+        score = max(0, min(100, int(float(_raw_score)))) if _raw_score is not None else 0
+    except (TypeError, ValueError):
+        score = 0
+
     flags  = result.get("red_flags_found", [])
     disq   = result.get("disqualifier_triggered")
     qualif = result.get("qualified", False)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Score",       f"{score}/100")
-    m2.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
-    m3.metric("Disposition", result.get("disposition_suggested", "—"))
-    m4.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
+    # Score banner — always visible, never blank
+    score_color = "#2e7d32" if score >= 70 else "#e65100" if score >= 45 else "#c62828"
+    st.markdown(
+        f'<div style="background:{score_color};color:white;border-radius:8px;'
+        f'padding:0.6rem 1.2rem;font-size:1.4rem;font-weight:700;display:inline-block;'
+        f'margin-bottom:0.8rem;">📊 Score: {score}/100</div>',
+        unsafe_allow_html=True,
+    )
     st.progress(score / 100)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Qualified",   "✅ Yes" if qualif else "❌ No")
+    m2.metric("Disposition", result.get("disposition_suggested", "—"))
+    m3.metric("Red Flags",   f"🚩 {len(flags)}" if flags else "✅ None")
+    m4.metric("Checklist",   f"{sum(1 for x in result.get('checklist_results',[]) if (x.get('result') or '').upper()=='YES')}/{len(result.get('checklist_results',[]))}")
 
     if disq:
         st.error(f"🚫 Hard Disqualifier Triggered: {disq}")
@@ -450,19 +465,36 @@ for stored in st.session_state.analysis_results:
                         new_temp = recalculate_temp(call_data, mv_val)
                         st.session_state[current_temp_key] = new_temp
 
-                        # Update Temp line in template
+                        # 1. Update Temp line
                         updated = re.sub(
                             r'^((?:Lead\s+)?Temp(?:erature)?\s*:)\s*.*$',
                             rf'\1 {new_temp}',
                             template_filled,
                             flags=re.IGNORECASE | re.MULTILINE,
                         )
+                        # 2. Update Zestimate / MV field with the entered value
+                        mv_raw_clean = mv_raw.strip()
+                        if mv_val is not None:
+                            zest_fill = f"${mv_val:,.0f}"
+                        elif mv_raw_clean.lower() in ("n/a", "na", "none", "n.a."):
+                            zest_fill = "N/A"
+                        else:
+                            zest_fill = None
+
+                        if zest_fill:
+                            updated = re.sub(
+                                r'^(\s*(?:Zestimate|Market\s*Value|MV)\s*:)\s*.*$',
+                                rf'\1 {zest_fill}',
+                                updated,
+                                flags=re.IGNORECASE | re.MULTILINE,
+                            )
+
                         for r in st.session_state.analysis_results:
                             if r["audio_hash"] == audio_hash:
                                 r["template_filled"] = updated
                                 break
 
-                        # Rerun so the temperature badge and template both refresh
+                        # Rerun so temperature badge and template both refresh instantly
                         st.rerun()
             st.markdown("")
 
