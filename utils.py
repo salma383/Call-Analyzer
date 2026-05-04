@@ -374,6 +374,40 @@ def _inject_email(template_text: str, email: str) -> str:
     return template_text
 
 
+def _restore_missing_fields(filled: str, template: str) -> str:
+    """
+    Safety net: if GPT dropped any field label from the template,
+    re-insert it with 'Not captured' so the template structure stays intact.
+    """
+    if not filled or not template:
+        return filled
+
+    # Extract field labels from the original template (lines like "  Name:" or "AP:")
+    template_fields = []
+    for line in template.splitlines():
+        m = re.match(r'^[\s•]*([A-Za-z][A-Za-z /]+?):\s*', line)
+        if m:
+            label = m.group(1).strip()
+            # Skip header-like lines and the agent/date placeholder
+            if label.lower() not in ("agent name and date", "temp"):
+                template_fields.append(label)
+
+    for field in template_fields:
+        # Check if this field label exists in the filled template
+        pattern = rf'^\s*•?\s*{re.escape(field)}\s*:'
+        if not re.search(pattern, filled, re.MULTILINE | re.IGNORECASE):
+            # Insert before "Call Recording" line
+            filled = re.sub(
+                r'(^\s*•?\s*Call Recording)',
+                f'  {field}: Not captured\n\n\\1',
+                filled,
+                count=1,
+                flags=re.MULTILINE,
+            )
+
+    return filled
+
+
 def _scrub_preliminary_text(template_text: str, temp: str | None) -> str:
     """Strip any leftover 'Preliminary — recalculate after MV' text from the Temp line."""
     if not template_text:
@@ -493,7 +527,9 @@ def build_scoring_prompt(client_name, criteria, agent_name, call_date,
 
 7. "call_data": object used for recalculation when user supplies MV:
    {{ "ap": <asking price as number or null>, "has_valid_motive": <true|false>,
-      "timeline_months": <estimated months or null>, "open_to_listing": <true|false>,
+      "timeline_months": <estimated months or null>,
+      "open_to_listing": <true if prospect said ANY affirmative (yeah, yes, sure, yep, multiple)
+       when asked about listing on the market — this is SEPARATE from their overall selling intent>,
       "prospect_interest_level": "<High|Medium|Low>",
       "prospect_interest_notes": "<1-sentence reason for this assessment>" }}
 """ if is_re else ""
@@ -543,11 +579,18 @@ Instructions for lead template:
 - {phone_note}- {mv_note}- For real estate clients: fill the Temp line with a single concrete word
   (Hot / Warm / Cold / Nurture / Throwaway). NEVER write "Preliminary", "recalculate
   after MV", "TBD", "unknown", or "pending" in the Temp line.
-- Preserve the exact template structure including all labels.
+- CRITICAL: You MUST output EVERY field label that appears in the template above.
+  Do NOT skip, drop, or remove ANY field. Count them: every "FieldName:" in the
+  template must appear in your output. If a field wasn't discussed, write "Not captured".
 - REASON field: Always fill with the prospect's stated reason, situation, or objection —
   even if negative. If they said they're not selling, write WHY (e.g., "Considering renting
   out instead", "Not ready yet, wants to wait", "Not interested at this time"). Only write
   "Not captured" if the prospect said absolutely nothing about their reason/intent.
+- LISTING field: Write "Yes" if the prospect said any affirmative (yeah, yes, sure, I would,
+  multiple, yep) when asked about listing on the market. Write "No" if they refused.
+  Write "Not captured" if the topic never came up. The listing question is SEPARATE from
+  the prospect's overall willingness to sell — they can say "I'm not sure about selling"
+  AND still say "yeah" when asked specifically about listing.
 - ZESTIMATE field: Leave blank — the user will fill it from Zillow. Do NOT write "Not captured".
 - AP (Asking Price): Write the number if the prospect mentioned a price. If not mentioned,
   write "Not captured". Do NOT guess or infer a price.

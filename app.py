@@ -13,7 +13,7 @@ from utils import (
     transcribe_audio, build_scoring_prompt, score_transcript,
     chunk_transcript, merge_scoring_results,
     reconstruct_spelled_out, append_audit_log,
-    extract_email, _inject_email, _scrub_preliminary_text,
+    extract_email, _inject_email, _restore_missing_fields, _scrub_preliminary_text,
     _looks_like_spelled_email, build_labeled_transcript, recalculate_temp,
 )
 
@@ -315,6 +315,7 @@ if analyze_btn:
             template_filled = _inject_email(template_filled, verified_email)
         prelim_temp = result.get("preliminary_temp")
         template_filled = _scrub_preliminary_text(template_filled, prelim_temp)
+        template_filled = _restore_missing_fields(template_filled, template)
         template_filled = reconstruct_spelled_out(template_filled)
         result["lead_template_filled"] = template_filled
 
