@@ -158,28 +158,55 @@ def transcribe_audio(client_groq, audio_file):
     segments        = _get(resp, "segments", []) or []
 
     # ── Hallucination filtering ────────────────────────────────────────────────
-    # Whisper's verbose_json returns per-segment quality signals.
-    # We use them to drop segments Whisper itself wasn't confident about
-    # before they pollute the transcript or confuse GPT.
+    # Multi-layer detection: non-Latin chars → foreign language words →
+    # Whisper confidence signals → repetition loops.
 
-    # Non-Latin Unicode blocks that never legitimately appear in English
-    # real estate calls — if any appear, the segment is a hallucination.
+    # Layer 1: Non-Latin Unicode blocks (Korean, Arabic, CJK, Cyrillic, etc.)
     _NON_LATIN = re.compile(
-        r'[Ѐ-ӿ'   # Cyrillic
-        r'؀-ۿ'   # Arabic
-        r'぀-ヿ'   # Japanese hiragana/katakana
-        r'一-鿿'   # CJK unified ideographs
-        r'가-힣]'  # Korean Hangul
+        r'[Ѐ-ӿ'    # Cyrillic
+        r'؀-ۿ'     # Arabic / Persian
+        r'぀-ヿ'     # Japanese hiragana / katakana
+        r'一-鿿'     # CJK unified ideographs
+        r'가-힣]'    # Korean Hangul
+    )
+
+    # Layer 2a: Latin-extended diacritics in bulk (ó, ü, ä, é …)
+    # Isolated accented characters can be prospect names (José, Chávez).
+    # 3+ of them in one segment → Whisper hallucinating in French/German/Spanish.
+    _LATIN_EXT = re.compile(r'[À-ÖØ-öø-ÿ]')
+
+    # Layer 2b: German / French / Spanish morphological markers that are
+    # essentially impossible in an English real-estate call:
+    #   • German function/content words: ihrer, sollen, quand, aplicar …
+    #   • German derivational suffixes: -schaft, -ierung, -keit, -heit
+    #     (matched only when preceded by 3+ chars to avoid "shaft", "height")
+    #   • Invented / nonsense tokens seen repeatedly in Groq hallucinations
+    _FOREIGN = re.compile(
+        r'\b(?:ihrer|verschiedene\w*|sollen\b|aplicar\b|'
+        r'interoperabilit\w+|abagtan\b|thegu\b|'
+        r'quand\b|distrakt\w*|sac\s+distracting)\b|'
+        r'\b\w{3,}(?:schaft|ierung|keit)\b',
+        re.IGNORECASE,
     )
 
     def _is_hallucination(seg) -> bool:
         text = (_get(seg, "text", "") or "").strip()
+        if not text:
+            return False
 
-        # 1. Non-Latin characters → definite hallucination
+        # Layer 1 — non-Latin scripts
         if _NON_LATIN.search(text):
             return True
 
-        # 2. Whisper's own confidence signals (may not always be present)
+        # Layer 2a — bulk Latin-extended diacritics
+        if len(_LATIN_EXT.findall(text)) >= 3:
+            return True
+
+        # Layer 2b — German / French morphological markers
+        if _FOREIGN.search(text):
+            return True
+
+        # Layer 3 — Whisper's own confidence signals (present when Groq returns them)
         try:
             no_speech = float(_get(seg, "no_speech_prob", 0) or 0)
         except (TypeError, ValueError):
@@ -189,21 +216,17 @@ def transcribe_audio(client_groq, audio_file):
         except (TypeError, ValueError):
             logprob = 0.0
         try:
-            comp    = float(_get(seg, "compression_ratio", 1) or 1)
+            comp = float(_get(seg, "compression_ratio", 1) or 1)
         except (TypeError, ValueError):
             comp = 1.0
 
-        # High no-speech probability → Whisper is filling silence
-        if no_speech > 0.6:
+        if no_speech > 0.6:                         # Whisper: probably silence
             return True
-        # Both signals agree it's unreliable
-        if no_speech > 0.4 and logprob < -1.0:
+        if no_speech > 0.4 and logprob < -1.0:      # Both signals agree
             return True
-        # Extremely low log-prob alone (severe hallucination)
-        if logprob < -1.5:
+        if logprob < -1.5:                           # Extremely low confidence
             return True
-        # Repetition loop (compression ratio too high for a long segment)
-        if comp > 2.4 and len(text) > 80:
+        if comp > 2.4 and len(text) > 80:            # Repetition loop
             return True
 
         return False
