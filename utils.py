@@ -155,20 +155,81 @@ def transcribe_audio(client_groq, audio_file):
         return getattr(obj, key, default)
 
     transcript_text = (_get(resp, "text", "") or "").strip()
-    segments = _get(resp, "segments", []) or []
+    segments        = _get(resp, "segments", []) or []
 
-    # Build timestamped display lines from segments
-    raw_lines = []
+    # ── Hallucination filtering ────────────────────────────────────────────────
+    # Whisper's verbose_json returns per-segment quality signals.
+    # We use them to drop segments Whisper itself wasn't confident about
+    # before they pollute the transcript or confuse GPT.
+
+    # Non-Latin Unicode blocks that never legitimately appear in English
+    # real estate calls — if any appear, the segment is a hallucination.
+    _NON_LATIN = re.compile(
+        r'[Ѐ-ӿ'   # Cyrillic
+        r'؀-ۿ'   # Arabic
+        r'぀-ヿ'   # Japanese hiragana/katakana
+        r'一-鿿'   # CJK unified ideographs
+        r'가-힣]'  # Korean Hangul
+    )
+
+    def _is_hallucination(seg) -> bool:
+        text = (_get(seg, "text", "") or "").strip()
+
+        # 1. Non-Latin characters → definite hallucination
+        if _NON_LATIN.search(text):
+            return True
+
+        # 2. Whisper's own confidence signals (may not always be present)
+        try:
+            no_speech = float(_get(seg, "no_speech_prob", 0) or 0)
+        except (TypeError, ValueError):
+            no_speech = 0.0
+        try:
+            logprob = float(_get(seg, "avg_logprob", 0) or 0)
+        except (TypeError, ValueError):
+            logprob = 0.0
+        try:
+            comp    = float(_get(seg, "compression_ratio", 1) or 1)
+        except (TypeError, ValueError):
+            comp = 1.0
+
+        # High no-speech probability → Whisper is filling silence
+        if no_speech > 0.6:
+            return True
+        # Both signals agree it's unreliable
+        if no_speech > 0.4 and logprob < -1.0:
+            return True
+        # Extremely low log-prob alone (severe hallucination)
+        if logprob < -1.5:
+            return True
+        # Repetition loop (compression ratio too high for a long segment)
+        if comp > 2.4 and len(text) > 80:
+            return True
+
+        return False
+
+    raw_lines        = []
+    clean_text_parts = []
+
     for seg in segments:
-        start = _get(seg, "start", 0) or 0
         text = (_get(seg, "text", "") or "").strip()
         if not text:
             continue
-        mins = int(start) // 60
-        secs = int(start) % 60
-        raw_lines.append(f"[{mins:02d}:{secs:02d}] {text}")
+        if _is_hallucination(seg):
+            continue   # drop — don't let garbage reach GPT or the UI
 
-    # Clean: dedup loops + filter hallucinations
+        start = _get(seg, "start", 0) or 0
+        mins  = int(start) // 60
+        secs  = int(start) % 60
+        raw_lines.append(f"[{mins:02d}:{secs:02d}] {text}")
+        clean_text_parts.append(text)
+
+    # Rebuild transcript_text from clean segments so GPT never sees hallucinations.
+    # Fall back to the raw response text only if every segment was filtered out.
+    if clean_text_parts:
+        transcript_text = " ".join(clean_text_parts)
+
+    # Clean: dedup loops + filter known hallucination phrases
     raw_lines = _dedupe_consecutive_lines(raw_lines)
     raw_lines = _filter_hallucinations(raw_lines)
 

@@ -528,7 +528,7 @@ WHISPER_VOCAB = (
     "sierra, tango, uniform, victor, whiskey, yankee, zulu"
 )
 
-# Known Whisper hallucinations to filter
+# Known Whisper hallucinations to filter (exact-match on segment body)
 WHISPER_HALLUCINATIONS = [
     "thank you for watching",
     "thanks for watching",
@@ -536,4 +536,13 @@ WHISPER_HALLUCINATIONS = [
     "like and subscribe",
     "email addresses should be written",
     "not spelled out letter by letter",
+    "for more information visit",
+    "please note how limited your phone",
+    "before we answer this",
+    "translated the conversation",
+    "transl heated the conversation",
+    "approximately 5 minutes per call",
+    "subtitles by the amara.org community",
+    "this video was made possible",
+    "sponsored by",
 ]
