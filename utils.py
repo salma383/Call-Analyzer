@@ -110,23 +110,18 @@ def _filter_hallucinations(lines: list[str]) -> list[str]:
 
 # ─── Transcription (Groq Whisper) ────────────────────────────────────────────
 
-_WHISPER_PROMPT = (
-    "Real estate and business acquisition sales call. "
-    f"Vocab: {WHISPER_VOCAB}. "
-    "Prospects often spell their name and email letter by letter, "
-    "sometimes using phonetic alphabet: 'N as in Nancy', 'T as in Tom'. "
-    "They may say 'at gmail dot com' for @gmail.com."
-)
-
-
 def transcribe_audio(client_groq, audio_file):
     """
     Transcribe audio via Groq Whisper (whisper-large-v3).
     Returns (transcript_text, segments, display_transcript).
 
-    NOTE: We do NOT pass temperature=0. Whisper's default uses a fallback
+    NOTE 1: We do NOT pass temperature=0. Whisper's default uses a fallback
     chain (0→0.2→0.4…) when segments are low-confidence. Forcing temp=0
     disables that chain and causes Whisper to silently drop hard segments.
+
+    NOTE 2: We intentionally send NO prompt. A long vocab/phonetic-alphabet
+    prompt was causing Whisper to hallucinate wildly during unclear audio —
+    the user's proven-clean app sends no prompt at all.
     """
     suffix = f".{audio_file.name.split('.')[-1]}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -137,13 +132,11 @@ def transcribe_audio(client_groq, audio_file):
         with open(tmp_path, "rb") as f:
             resp = call_with_retry(
                 client_groq.audio.transcriptions.create,
-                file=(os.path.basename(tmp_path), f.read()),
+                file=(audio_file.name, f.read()),
                 model="whisper-large-v3",
-                prompt=_WHISPER_PROMPT,
                 response_format="verbose_json",
+                timestamp_granularities=["segment"],
                 language="en",
-                # temperature intentionally omitted — let Whisper use its
-                # internal fallback chain so hard segments don't get dropped
             )
     finally:
         if os.path.exists(tmp_path):
